@@ -201,46 +201,68 @@ static void led_resume(void)
 #endif
 
 #ifdef LED_RGB_COLOR
-static int led_pwm_period[5][3] = {
-	{CONFIG_LED_DEFAULT_COLOR_R, CONFIG_LED_DEFAULT_COLOR_G, CONFIG_LED_DEFAULT_COLOR_B}, // Default
-	{0, 10000, 0},                                                                        // Success
-	{10000, 0, 0},                                                                        // Error
-	{8000, 2000, 0},                                                                      // Charging
-	{0, 0, 10000},                                                                        // Pairing
+static int led_pwm_period[7][3] = {
+	{CONFIG_LED_DEFAULT_COLOR_R, CONFIG_LED_DEFAULT_COLOR_G, CONFIG_LED_DEFAULT_COLOR_B}, // Default (purple)
+	{0, 10000, 0},                                                                        // Success (green)
+	{10000, 0, 0},                                                                        // Error (red)
+	{8000, 3000, 0},                                                                      // Charging (amber)
+	{0, 0, 10000},                                                                        // Pairing (blue)
+	{10000, 8000, 0},                                                                     // Warning (yellow)
+	{10000, 4500, 0},                                                                     // No-receiver (orange)
 };
 #elif defined(LED_TRI_COLOR)
-static int led_pwm_period[5][3] = {
-	{0, 0, 10000},   // Default
-	{0, 10000, 0},   // Success
-	{10000, 0, 0},   // Error
-	{6000, 4000, 0}, // Charging
-	{0, 0, 10000},   // Pairing
+static int led_pwm_period[7][3] = {
+	{0, 0, 10000},    // Default
+	{0, 10000, 0},    // Success
+	{10000, 0, 0},    // Error
+	{6000, 4000, 0},  // Charging
+	{0, 0, 10000},    // Pairing
+	{8000, 8000, 0},  // Warning (yellow)
+	{10000, 4000, 0}, // No-receiver (orange)
 };
 #elif defined(LED_RG_COLOR)
-static int led_pwm_period[5][2] = {
+static int led_pwm_period[7][2] = {
 	{CONFIG_LED_DEFAULT_COLOR_R, CONFIG_LED_DEFAULT_COLOR_G}, // Default
 	{0, 10000},                                               // Success
 	{10000, 0},                                               // Error
 	{8000, 2000},                                             // Charging
 	{4000, 6000},                                             // Pairing
+	{10000, 8000},                                            // Warning (yellow)
+	{10000, 4000},                                            // No-receiver (orange)
 };
 #elif defined(LED_DUAL_COLOR)
-static int led_pwm_period[5][2] = {
-	{0, 10000},   // Default
-	{0, 10000},   // Success
-	{10000, 0},   // Error
-	{6000, 4000}, // Charging
-	{0, 10000},   // Pairing
+static int led_pwm_period[7][2] = {
+	{0, 10000},    // Default
+	{0, 10000},    // Success
+	{10000, 0},    // Error
+	{6000, 4000},  // Charging
+	{0, 10000},    // Pairing
+	{10000, 4000}, // Warning
+	{10000, 2000}, // No-receiver
 };
 #else
-static int led_pwm_period[5][1] = {
+static int led_pwm_period[7][1] = {
 	{10000}, // Default
 	{10000}, // Success
 	{10000}, // Error
 	{10000}, // Charging
 	{10000}, // Pairing
+	{10000}, // Warning
+	{10000}, // No-receiver
 };
 #endif
+
+// Quadratic breath curve. Returns 0..peak following a smooth bell shape over
+// 2*fade steps (fade-up then fade-down). Used by SYS_LED_PATTERN_* cases that
+// step through fade phases with a fixed step time.
+static inline int led_breath_value(int phase, int fade, int peak)
+{
+	if (phase < 0 || phase >= 2 * fade) {
+		return 0;
+	}
+	int p = phase < fade ? phase : (2 * fade - phase);
+	return (p * p * peak) / (fade * fade);
+}
 
 // Using brightness and value if PWM is supported, otherwise value is coerced to on/off
 // TODO: use computed constants for high/low brightness and color values
@@ -338,28 +360,62 @@ static void led_thread(void)
 			k_thread_suspend(led_thread_id);
 			break;
 		case SYS_LED_PATTERN_SHORT:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_PAIRING, 10000, led_pattern_state * 10000);
-			k_msleep(led_pattern_state == 1 ? 100 : 900);
+			// Breathy pairing pulse: 200ms breath + 800ms rest @ 1Hz
+			led_pattern_state++;
+			if (led_pattern_state < 20) {
+				led_pin_set(SYS_LED_COLOR_PAIRING, 10000,
+							led_breath_value(led_pattern_state, 10, 10000));
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_PAIRING, 10000, 0);
+				k_msleep(800);
+				led_pattern_state = 0;
+			}
 			break;
 		case SYS_LED_PATTERN_LONG:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, led_pattern_state * 10000);
-			k_msleep(500);
+			// Breathy waiting pulse: 600ms breath + 400ms rest @ 1Hz
+			led_pattern_state++;
+			if (led_pattern_state < 60) {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000,
+							led_breath_value(led_pattern_state, 30, 10000));
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
+				k_msleep(400);
+				led_pattern_state = 0;
+			}
 			break;
 		case SYS_LED_PATTERN_FLASH:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, led_pattern_state * 10000);
-			k_msleep(200);
+			// Breathy quick pulse: 200ms breath + 200ms rest @ 2.5Hz
+			led_pattern_state++;
+			if (led_pattern_state < 20) {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000,
+							led_breath_value(led_pattern_state, 10, 10000));
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
+				k_msleep(200);
+				led_pattern_state = 0;
+			}
 			break;
 
 		case SYS_LED_PATTERN_ONESHOT_POWERON:
+			// Smooth 500ms fade-up, 200ms hold, 300ms fade-down.
+			// Quadratic brightness ramp matches human perceptual response —
+			// linear PWM scaling looks fast at the start and slow at the end.
 			led_pattern_state++;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, !(led_pattern_state % 2) * 10000);
-			if (led_pattern_state == 7) {
-				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
+			if (led_pattern_state <= 100) {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, led_pattern_state * led_pattern_state, 10000);
+				k_msleep(5);
+			} else if (led_pattern_state <= 140) {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 10000);
+				k_msleep(5);
+			} else if (led_pattern_state <= 200) {
+				int n = 200 - led_pattern_state; // 59 → 0
+				led_pin_set(SYS_LED_COLOR_DEFAULT, n * n * 10000 / 3481, 10000);
+				k_msleep(5);
 			} else {
-				k_msleep(200);
+				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
 			}
 			break;
 		case SYS_LED_PATTERN_ONESHOT_POWEROFF:
@@ -381,30 +437,46 @@ static void led_thread(void)
 			}
 			break;
 		case SYS_LED_PATTERN_ONESHOT_PROGRESS:
+			// 2 breathy success pulses: each pulse is 200ms breath + 100ms gap.
+			// 30-step slot per pulse, 60 steps total + finishing OFF call.
 			led_pattern_state++;
-			led_pin_set(SYS_LED_COLOR_SUCCESS, 10000, !(led_pattern_state % 2) * 10000);
-			if (led_pattern_state == 5) {
+			if (led_pattern_state > 60) {
 				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			} else {
-				k_msleep(200);
+				break;
+			}
+			{
+				int pos = (led_pattern_state - 1) % 30;
+				int v = pos < 20 ? led_breath_value(pos, 10, 10000) : 0;
+				led_pin_set(SYS_LED_COLOR_SUCCESS, 10000, v);
+				k_msleep(10);
 			}
 			break;
 		case SYS_LED_PATTERN_ONESHOT_COMPLETE:
+			// 4 breathy success pulses
 			led_pattern_state++;
-			led_pin_set(SYS_LED_COLOR_SUCCESS, 10000, !(led_pattern_state % 2) * 10000);
-			if (led_pattern_state == 9) {
+			if (led_pattern_state > 120) {
 				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			} else {
-				k_msleep(200);
+				break;
+			}
+			{
+				int pos = (led_pattern_state - 1) % 30;
+				int v = pos < 20 ? led_breath_value(pos, 10, 10000) : 0;
+				led_pin_set(SYS_LED_COLOR_SUCCESS, 10000, v);
+				k_msleep(10);
 			}
 			break;
 		case SYS_LED_PATTERN_ONESHOT_PING:
+			// 10 breathy default-color pulses
 			led_pattern_state++;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, (led_pattern_state % 2) * 10000);
-			if (led_pattern_state == 20) { // 10 flashes (states 1-20), turn off at 20
+			if (led_pattern_state > 300) {
 				set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_HIGHEST);
-			} else {
-				k_msleep(200);
+				break;
+			}
+			{
+				int pos = (led_pattern_state - 1) % 30;
+				int v = pos < 20 ? led_breath_value(pos, 10, 10000) : 0;
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, v);
+				k_msleep(10);
 			}
 			break;
 
@@ -413,9 +485,21 @@ static void led_thread(void)
 			k_thread_suspend(led_thread_id);
 			break;
 		case SYS_LED_PATTERN_LONG_PERSIST:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_CHARGING, 2000, led_pattern_state * 10000);
-			k_msleep(500);
+			// Calm low-battery indicator: gentle yellow breath every 3 s.
+			// Yellow (not red) signals "heads up, charge soon" rather than
+			// "critical error". Long rest between breaths so it feels relaxed
+			// — and saves a bit of battery while the battery is already low.
+			// 600 ms breath + 2400 ms rest, peak 25 %.
+			led_pattern_state++;
+			if (led_pattern_state < 60) {
+				led_pin_set(SYS_LED_COLOR_WARNING, 10000,
+							led_breath_value(led_pattern_state, 30, 2500));
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_WARNING, 10000, 0);
+				k_msleep(2400);
+				led_pattern_state = 0;
+			}
 			break;
 		case SYS_LED_PATTERN_PULSE_PERSIST:
 			led_pattern_state = (led_pattern_state + 1) % 1000;
@@ -434,32 +518,180 @@ static void led_thread(void)
 			led_pin_set(SYS_LED_COLOR_CHARGING, 10000, led_value);
 			k_msleep(5);
 			break;
-		case SYS_LED_PATTERN_ACTIVE_PERSIST: // off duration first because the device may turn on multiple times rapidly
-											 // and waste battery power
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, !led_pattern_state * 10000);
-			k_msleep(led_pattern_state ? 9700 : 300);
+		case SYS_LED_PATTERN_ACTIVE_PERSIST:
+			// Breathy heartbeat: 300ms breath @ peak 40% + 9700ms rest
+			led_pattern_state++;
+			if (led_pattern_state < 30) {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000,
+							led_breath_value(led_pattern_state, 15, 4000));
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_DEFAULT, 10000, 0);
+				k_msleep(9700);
+				led_pattern_state = 0;
+			}
 			break;
 
-		case SYS_LED_PATTERN_ERROR_A: // TODO: should this use 20% duty cycle?
-			led_pattern_state = (led_pattern_state + 1) % 10;
-			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 4 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
+		case SYS_LED_PATTERN_ERROR_A:
+			// 2 breathy red pulses then long pause = 5s cycle
+			led_pattern_state++;
+			if (led_pattern_state <= 60) {
+				int pos = (led_pattern_state - 1) % 30;
+				int v = pos < 20 ? led_breath_value(pos, 10, 10000) : 0;
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, v);
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, 0);
+				k_msleep(4400);
+				led_pattern_state = 0;
+			}
 			break;
 		case SYS_LED_PATTERN_ERROR_B:
-			led_pattern_state = (led_pattern_state + 1) % 10;
-			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 6 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
+			// 3 breathy red pulses then pause = 5s cycle
+			led_pattern_state++;
+			if (led_pattern_state <= 90) {
+				int pos = (led_pattern_state - 1) % 30;
+				int v = pos < 20 ? led_breath_value(pos, 10, 10000) : 0;
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, v);
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, 0);
+				k_msleep(4100);
+				led_pattern_state = 0;
+			}
 			break;
 		case SYS_LED_PATTERN_ERROR_C:
-			led_pattern_state = (led_pattern_state + 1) % 10;
-			led_pin_set(SYS_LED_COLOR_ERROR, 10000, (led_pattern_state < 8 && led_pattern_state % 2) * 10000);
-			k_msleep(500);
+			// 4 breathy red pulses then pause = 5s cycle
+			led_pattern_state++;
+			if (led_pattern_state <= 120) {
+				int pos = (led_pattern_state - 1) % 30;
+				int v = pos < 20 ? led_breath_value(pos, 10, 10000) : 0;
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, v);
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, 0);
+				k_msleep(3800);
+				led_pattern_state = 0;
+			}
 			break;
 		case SYS_LED_PATTERN_ERROR_D:
-			led_pattern_state = (led_pattern_state + 1) % 2;
-			led_pin_set(SYS_LED_COLOR_ERROR, 10000, led_pattern_state * 10000);
-			k_msleep(500);
+			// Continuous breathy red @ 1Hz
+			led_pattern_state++;
+			if (led_pattern_state < 60) {
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000,
+							led_breath_value(led_pattern_state, 30, 10000));
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, 0);
+				k_msleep(400);
+				led_pattern_state = 0;
+			}
+			break;
+
+		case SYS_LED_PATTERN_HARDWARE_ERROR:
+			// Three rapid red breath-pulses + 800 ms rest. Urgent feel —
+			// reads as "the device itself is broken, contact support".
+			// 60 fast steps + rest = ~1.4 s cycle.
+			led_pattern_state++;
+			if (led_pattern_state <= 60) {
+				int pos = (led_pattern_state - 1) % 20; // 20 steps per pulse
+				int v = pos < 16 ? led_breath_value(pos, 8, 10000) : 0;
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, v);
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000, 0);
+				k_msleep(800);
+				led_pattern_state = 0;
+			}
+			break;
+
+		case SYS_LED_PATTERN_NO_RECEIVER:
+			// Two orange "phone-ring" breaths + 2 s rest. Reads as "calling…
+			// calling…" — clearly a connectivity issue, not a device fault.
+			led_pattern_state++;
+			if (led_pattern_state < 30) {
+				// First breath: 300 ms
+				led_pin_set(SYS_LED_COLOR_NO_RECEIVER, 10000,
+							led_breath_value(led_pattern_state, 15, 6000));
+				k_msleep(10);
+			} else if (led_pattern_state < 40) {
+				// 100 ms gap between the two breaths
+				led_pin_set(SYS_LED_COLOR_NO_RECEIVER, 10000, 0);
+				k_msleep(10);
+			} else if (led_pattern_state < 70) {
+				// Second breath
+				int pos = led_pattern_state - 40;
+				led_pin_set(SYS_LED_COLOR_NO_RECEIVER, 10000,
+							led_breath_value(pos, 15, 6000));
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_NO_RECEIVER, 10000, 0);
+				k_msleep(2000);
+				led_pattern_state = 0;
+			}
+			break;
+
+		case SYS_LED_PATTERN_RAINBOW_RAMP:
+			// Pride rainbow cycle. 6 keyframes × 60 steps × 10 ms = 3.6 s
+			// for one full hue rotation. Smooth cross-fade between
+			// keyframes via linear interpolation. Bypasses the colour
+			// table because we want full RGB control. 🏳️‍🌈
+			led_pattern_state = (led_pattern_state + 1) % 360;
+			{
+				static const int keyframes[6][3] = {
+					{10000,     0,     0}, // Red
+					{10000,  5000,     0}, // Orange
+					{10000, 10000,     0}, // Yellow
+					{    0, 10000,     0}, // Green
+					{    0,     0, 10000}, // Blue
+					{ 8000,     0, 10000}, // Purple
+				};
+				int idx = led_pattern_state / 60;
+				int t = led_pattern_state % 60;
+				int next_idx = (idx + 1) % 6;
+				int r = (keyframes[idx][0] * (60 - t) + keyframes[next_idx][0] * t) / 60;
+				int g = (keyframes[idx][1] * (60 - t) + keyframes[next_idx][1] * t) / 60;
+				int b = (keyframes[idx][2] * (60 - t) + keyframes[next_idx][2] * t) / 60;
+				// 60 % brightness — comfortable to look at
+				r = r * 60 / 100;
+				g = g * 60 / 100;
+				b = b * 60 / 100;
+#if defined(PWM_LED_EXISTS)
+				pwm_set_pulse_dt(&pwm_led, pwm_led.period / 10000 * r);
+#endif
+#if defined(PWM_LED1_EXISTS)
+				pwm_set_pulse_dt(&pwm_led1, pwm_led1.period / 10000 * g);
+#endif
+#if defined(PWM_LED2_EXISTS)
+				pwm_set_pulse_dt(&pwm_led2, pwm_led2.period / 10000 * b);
+#endif
+			}
+			k_msleep(10);
+			break;
+
+		case SYS_LED_PATTERN_DRAIN_PERSIST:
+			// Drive R+G+B PWM channels at peak (white) to maximise LED current.
+			// Bypasses the colour table — this is intentionally outside the
+			// normal palette because we want all three channels at 100 %.
+			// Brief 200 ms off-pulse every 5 s for visual distinctiveness;
+			// drain is reduced by ~4 % which is negligible.
+			led_pattern_state = (led_pattern_state + 1) % 50; // 50 × 100 ms = 5 s cycle
+			{
+				bool dim = (led_pattern_state >= 48); // last 200 ms of cycle
+#if defined(PWM_LED_EXISTS)
+				pwm_set_pulse_dt(&pwm_led, dim ? 0 : pwm_led.period);
+#endif
+#if defined(PWM_LED1_EXISTS)
+				pwm_set_pulse_dt(&pwm_led1, dim ? 0 : pwm_led1.period);
+#endif
+#if defined(PWM_LED2_EXISTS)
+				pwm_set_pulse_dt(&pwm_led2, dim ? 0 : pwm_led2.period);
+#endif
+#if !defined(PWM_LED_EXISTS) && defined(LED_EXISTS)
+				gpio_pin_set_dt(&led, dim ? 0 : 1);
+#endif
+			}
+			k_msleep(100);
 			break;
 
 		default:

@@ -302,24 +302,430 @@ int sensor_get_sensor_temperature(float *ptr)
 	return 0;
 }
 
+#if SENSOR_IMU_SPI_EXISTS && CONFIG_IMU_SPI_LSM6DSV_RECOVERY
+static void sensor_spi_imu_recovery(void)
+{
+	// Send full BOOT (CTRL3 = 0x80) followed by SW_RESET (CTRL3 = 0x01) to
+	// fully reload trim/registers and clear any stuck SPI state. Asserting CS
+	// during each write also terminates any stuck transaction left over from
+	// floating SPI pins during battery power-on.
+	sensor_imu_spi_dev.config.frequency = MHZ(10);
+
+	uint8_t boot_buf[2] = {0x12, 0x80}; // CTRL3.BOOT = 1 (reload memory)
+	struct spi_buf b1 = {.buf = boot_buf, .len = sizeof(boot_buf)};
+	struct spi_buf_set tx1 = {.buffers = &b1, .count = 1};
+	spi_write_dt(&sensor_imu_spi_dev, &tx1);
+	k_msleep(20); // BOOT recovery time: ~15 ms
+
+	uint8_t reset_buf[2] = {0x12, 0x01}; // CTRL3.SW_RESET = 1
+	struct spi_buf b2 = {.buf = reset_buf, .len = sizeof(reset_buf)};
+	struct spi_buf_set tx2 = {.buffers = &b2, .count = 1};
+	spi_write_dt(&sensor_imu_spi_dev, &tx2);
+	k_msleep(50); // wait for IMU POR to complete after SW_RESET
+}
+
+// =============================================================================
+// I2C bit-bang escape route for IMUs locked in I2C/I3C mode at POR.
+//
+// Failure mode: when the Mochi boots from an attached battery, the SPI CS pin
+// (P0.01) is high-Z while the MCU initialises. The LSM6DSV samples CS at its
+// internal POR rising edge — if it sees CS high, the IMU enters I2C/I3C mode
+// and stays there until the next power cycle. After that, every SPI transaction
+// returns garbage (WHO_AM_I = 0x00 / 0xFF). On the Mochi there's no firmware-
+// controllable IMU power gate, so we can't power-cycle the part.
+//
+// LSM6DSV.IF_CFG.I2C_I3C_DISABLE (reg 0x03 bit 0) disables I2C/I3C and forces
+// the device onto SPI. We can write that bit over I2C — bit-banged on the SPI
+// pins, since in I2C mode the IMU re-uses MOSI as SDA and SCK as SCL.
+//
+// Pin map (Mochi `mochi_uf2.dts`):
+//   spi3 MOSI = P0.05 → SDA in I2C mode
+//   spi3 SCK  = P0.04 → SCL in I2C mode
+//   spi3 CS   = P0.01 → tied HIGH = signal "I2C interface" (CS not used)
+// =============================================================================
+
+#include <hal/nrf_spim.h>
+
+#define BB_I2C_SDA_PIN     5     // P0.05
+#define BB_I2C_SCL_PIN     4     // P0.04
+#define BB_I2C_CS_PIN      1     // P0.01 — drive HIGH for I2C mode
+#define BB_I2C_HALF_US     200   // ~2.5 kHz — slow but rock-solid on weak internal pull-ups
+#define BB_I2C_STRETCH_US  20000 // max wait for slave to release SCL
+
+static inline void bb_sda_release(void)
+{
+	nrf_gpio_cfg_input(BB_I2C_SDA_PIN, NRF_GPIO_PIN_PULLUP);
+}
+static inline void bb_sda_low(void)
+{
+	nrf_gpio_pin_clear(BB_I2C_SDA_PIN);
+	nrf_gpio_cfg_output(BB_I2C_SDA_PIN);
+}
+static inline void bb_scl_release(void)
+{
+	nrf_gpio_cfg_input(BB_I2C_SCL_PIN, NRF_GPIO_PIN_PULLUP);
+}
+static inline void bb_scl_low(void)
+{
+	nrf_gpio_pin_clear(BB_I2C_SCL_PIN);
+	nrf_gpio_cfg_output(BB_I2C_SCL_PIN);
+}
+static inline int bb_sda_read(void)
+{
+	return nrf_gpio_pin_read(BB_I2C_SDA_PIN);
+}
+static inline void bb_delay(void)
+{
+	k_busy_wait(BB_I2C_HALF_US);
+}
+
+static void bb_i2c_start(void)
+{
+	bb_sda_release();
+	bb_scl_release();
+	bb_delay();
+	bb_sda_low();
+	bb_delay();
+	bb_scl_low();
+	bb_delay();
+}
+
+static void bb_i2c_stop(void)
+{
+	bb_sda_low();
+	bb_delay();
+	bb_scl_release();
+	bb_delay();
+	bb_sda_release();
+	bb_delay();
+}
+
+// Returns 0 on ACK, 1 on NACK
+static int bb_i2c_write_byte(uint8_t b)
+{
+	for (int i = 7; i >= 0; i--) {
+		if (b & (1 << i)) bb_sda_release(); else bb_sda_low();
+		bb_delay();
+		bb_scl_release();
+		bb_delay();
+		bb_scl_low();
+		bb_delay();
+	}
+	bb_sda_release();
+	bb_delay();
+	bb_scl_release();
+	bb_delay();
+	int nack = bb_sda_read();
+	bb_scl_low();
+	bb_delay();
+	return nack ? 1 : 0;
+}
+
+static uint8_t bb_i2c_read_byte(int send_ack)
+{
+	uint8_t v = 0;
+	bb_sda_release();
+	for (int i = 7; i >= 0; i--) {
+		bb_delay();
+		bb_scl_release();
+		bb_delay();
+		if (bb_sda_read()) v |= (1 << i);
+		bb_scl_low();
+	}
+	if (send_ack) bb_sda_low(); else bb_sda_release();
+	bb_delay();
+	bb_scl_release();
+	bb_delay();
+	bb_scl_low();
+	bb_sda_release();
+	bb_delay();
+	return v;
+}
+
+static int bb_i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *out)
+{
+	bb_i2c_start();
+	if (bb_i2c_write_byte((addr << 1) | 0)) goto nack;
+	if (bb_i2c_write_byte(reg)) goto nack;
+	bb_i2c_start();
+	if (bb_i2c_write_byte((addr << 1) | 1)) goto nack;
+	*out = bb_i2c_read_byte(0);
+	bb_i2c_stop();
+	return 0;
+nack:
+	bb_i2c_stop();
+	return -1;
+}
+
+static int bb_i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t data)
+{
+	bb_i2c_start();
+	if (bb_i2c_write_byte((addr << 1) | 0)) goto nack;
+	if (bb_i2c_write_byte(reg)) goto nack;
+	if (bb_i2c_write_byte(data)) goto nack;
+	bb_i2c_stop();
+	return 0;
+nack:
+	bb_i2c_stop();
+	return -1;
+}
+
+// Wait until SCL is high (released by all parties), or timeout.
+// Returns 0 on success, -1 on timeout (slave is stuck holding SCL low).
+static int bb_scl_wait_high(void)
+{
+	uint32_t waited = 0;
+	while (nrf_gpio_pin_read(BB_I2C_SCL_PIN) == 0) {
+		if (waited >= BB_I2C_STRETCH_US) return -1;
+		k_busy_wait(10);
+		waited += 10;
+	}
+	return 0;
+}
+
+// Try to talk to the IMU over I2C; if it answers, force I2C-disable so SPI
+// resumes working on the next transaction. Returns 0 if the IMU was found
+// and the disable command was sent, -1 if not found.
+static int sensor_i2c_imu_recovery(void)
+{
+	LOG_INF("I2C recovery: starting");
+
+	// Suspend Zephyr SPI driver
+	sys_interface_suspend();
+
+	// Belt-and-braces: force-disable SPIM3 at the register level and clear its
+	// PSEL registers so the SPIM peripheral releases the pins entirely.
+	// Without this, sys_interface_suspend may apply pinctrl-sleep but leave the
+	// peripheral logically owning the pins, and our GPIO writes go nowhere.
+	uint32_t saved_enable    = NRF_SPIM3->ENABLE;
+	uint32_t saved_psel_mosi = NRF_SPIM3->PSEL.MOSI;
+	uint32_t saved_psel_sck  = NRF_SPIM3->PSEL.SCK;
+	uint32_t saved_psel_miso = NRF_SPIM3->PSEL.MISO;
+	NRF_SPIM3->ENABLE    = SPIM_ENABLE_ENABLE_Disabled;
+	NRF_SPIM3->PSEL.MOSI = 0xFFFFFFFFU;
+	NRF_SPIM3->PSEL.SCK  = 0xFFFFFFFFU;
+	NRF_SPIM3->PSEL.MISO = 0xFFFFFFFFU;
+	LOG_INF("I2C recovery: SPIM3 disabled, ENABLE was 0x%08X", saved_enable);
+
+	// Drive CS HIGH — signals "I2C interface" to the IMU (CS not used in I2C)
+	nrf_gpio_pin_set(BB_I2C_CS_PIN);
+	nrf_gpio_cfg_output(BB_I2C_CS_PIN);
+
+	// Park SDA/SCL high (configured as inputs with pull-up = released)
+	bb_sda_release();
+	bb_scl_release();
+	k_msleep(5);
+
+	// Read the actual line state so we can confirm pins are under our control.
+	int sda_idle = nrf_gpio_pin_read(BB_I2C_SDA_PIN);
+	int scl_idle = nrf_gpio_pin_read(BB_I2C_SCL_PIN);
+	LOG_INF("I2C recovery: idle bus state SDA=%d SCL=%d (both should be 1)", sda_idle, scl_idle);
+
+	// I2C bus clear: 9 SCL pulses with SDA released — recovers I2C from any
+	// stuck state where slave is mid-byte and holding SDA low waiting for clocks.
+	for (int i = 0; i < 9; i++) {
+		bb_scl_low();
+		bb_delay();
+		bb_scl_release();
+		if (bb_scl_wait_high() < 0) {
+			LOG_WRN("I2C recovery: SCL held low during bus-clear pulse %d", i);
+		}
+		bb_delay();
+	}
+	// Issue a STOP to leave the bus in a clean idle state
+	bb_sda_low();
+	bb_delay();
+	bb_scl_release();
+	bb_delay();
+	bb_sda_release();
+	k_msleep(2);
+
+	// I3C broadcast probe (0x7E): if any I3C device is on the bus it ACKs.
+	// This catches IMUs that have been latched into I3C-only mode.
+	{
+		bb_i2c_start();
+		int ack = bb_i2c_write_byte((0x7E << 1) | 0);
+		LOG_INF("I2C recovery: I3C broadcast probe 0x7E -> %s", ack == 0 ? "ACK" : "NACK");
+		if (ack == 0) {
+			// Send RSTDAA CCC (0x06) — resets dynamic-address assignment.
+			// Should restore I2C compatibility on I3C-locked devices.
+			LOG_INF("I2C recovery: sending I3C RSTDAA");
+			bb_i2c_write_byte(0x06);
+		}
+		bb_i2c_stop();
+		k_msleep(10);
+	}
+
+	// Full I2C bus scan — log every address that ACKs. Tells us whether
+	// the IMU is somewhere unexpected, or if nothing is on the bus at all.
+	LOG_INF("I2C recovery: bus scan 0x08-0x77...");
+	int responders = 0;
+	for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+		bb_i2c_start();
+		int ack = bb_i2c_write_byte((addr << 1) | 0);
+		bb_i2c_stop();
+		if (ack == 0) {
+			LOG_INF("I2C recovery:   ACK at 0x%02X", addr);
+			responders++;
+		}
+	}
+	LOG_INF("I2C recovery: bus scan done, %d responders", responders);
+
+	// Probe both possible I2C addresses for LSM6DSV
+	uint8_t who = 0;
+	uint8_t addr_found = 0;
+	for (uint8_t addr = 0x6A; addr <= 0x6B; addr++) {
+		who = 0;
+		int err = bb_i2c_read_reg(addr, 0x0F, &who);
+		LOG_INF("I2C recovery: probe 0x%02X -> err=%d, WHO_AM_I=0x%02X", addr, err, who);
+		if (err == 0 && (who == 0x70 || who == 0x71)) {
+			addr_found = addr;
+			break;
+		}
+	}
+
+	if (addr_found) {
+		LOG_INF("I2C recovery: writing IF_CFG.I2C_DISABLE on 0x%02X", addr_found);
+		int err1 = bb_i2c_write_reg(addr_found, 0x03, 0x01); // IF_CFG.I2C_I3C_DISABLE
+		LOG_INF("I2C recovery: IF_CFG write err=%d", err1);
+		k_msleep(2);
+		int err2 = bb_i2c_write_reg(addr_found, 0x12, 0x01); // CTRL3.SW_RESET
+		LOG_INF("I2C recovery: SW_RESET via I2C err=%d", err2);
+		k_msleep(50);
+	} else {
+		LOG_WRN("I2C recovery: LSM6DSV did not respond on 0x6A or 0x6B");
+	}
+
+	// Park pins, return to defaults
+	bb_sda_release();
+	bb_scl_release();
+	nrf_gpio_cfg_default(BB_I2C_SDA_PIN);
+	nrf_gpio_cfg_default(BB_I2C_SCL_PIN);
+	nrf_gpio_cfg_default(BB_I2C_CS_PIN);
+
+	// Restore SPIM3 PSELs so sys_interface_resume can re-enable cleanly
+	NRF_SPIM3->PSEL.MOSI = saved_psel_mosi;
+	NRF_SPIM3->PSEL.SCK  = saved_psel_sck;
+	NRF_SPIM3->PSEL.MISO = saved_psel_miso;
+
+	sys_interface_resume();
+
+	return addr_found ? 0 : -1;
+}
+#endif
+
+#if CONFIG_IMU_LOCKUP_DRAIN_RECOVERY
+__attribute__((noreturn))
+static void sensor_drain_mode(void)
+{
+	LOG_WRN("============================================================");
+	LOG_WRN("  IMU is unrecoverable on this boot — entering drain mode.");
+	LOG_WRN("  Battery will fully deplete (a few hours), then the device");
+	LOG_WRN("  will power off. Plug in USB-C AFTER it powers off to");
+	LOG_WRN("  recover (the IMU needs a true power cycle).");
+	LOG_WRN("============================================================");
+
+	// Set the distinctive max-drain LED pattern (R+G+B at peak, with periodic
+	// blink-off so the customer can recognise the recovery state visually).
+	set_led(SYS_LED_PATTERN_DRAIN_PERSIST, SYS_LED_PRIORITY_HIGHEST);
+
+	// Make sure the SPI bus is left enabled so any IMU traffic continues to
+	// burn power, and the ESB thread keeps spamming pair packets in the
+	// background — which contributes radio current.
+	sys_interface_resume();
+
+	// === Boost #1: triple LED current ===
+	// The pinctrl-default for pwm0 sets DRIVE = D0S1 (open-source, standard).
+	// Standard drive caps each pin at ~5 mA. Switch to D0H1 (open-source,
+	// high drive) — same logical behaviour, but each LED can now source up
+	// to ~15 mA. The PWM peripheral still owns the pin via PSEL; only the
+	// pad-driver strength changes. Mochi LED pin map: red=P0.20, grn=P0.09,
+	// blu=P0.17 (from mochi_uf2.dts pwm0_default).
+	const uint32_t led_pins[] = { 20, 9, 17 };
+	for (int i = 0; i < 3; i++) {
+		uint32_t pin = led_pins[i];
+		uint32_t cnf = NRF_P0->PIN_CNF[pin];
+		cnf = (cnf & ~GPIO_PIN_CNF_DRIVE_Msk)
+			| ((uint32_t)5 << GPIO_PIN_CNF_DRIVE_Pos); // D0H1
+		NRF_P0->PIN_CNF[pin] = cnf;
+	}
+	LOG_INF("Drain mode: LED pins boosted to high-drive (D0H1)");
+
+	// === Boost #2: disable internal DCDC ===
+	// Forces the nRF52833 onto its internal LDO regulator, which is less
+	// efficient — burns the difference as heat = more current draw from
+	// the battery. Worth ~5 mA at our load.
+	NRF_POWER->DCDCEN = 0;
+	LOG_INF("Drain mode: DCDC disabled, forced to LDO");
+
+	// === Boost #3: force HFCLK on ===
+	// Keeps the 32 MHz HFXO running continuously instead of letting the
+	// kernel idle to LFCLK between activity bursts. ~+1.5 mA.
+	NRF_CLOCK->TASKS_HFCLKSTART = 1;
+
+	// Tight CPU loop. Reduced yield interval to 1 ms (was 2 ms) so the CPU
+	// is active more of the time. Other threads (ESB, watchdog feeders)
+	// still get scheduled because they're high priority.
+	volatile float burn = 1.0f;
+	while (1) {
+		// CPU-intensive busy work, ~5 ms per iteration
+		for (int i = 0; i < 50000; i++) {
+			burn = burn * 1.0001f + 0.0001f;
+			if (burn > 100.0f) burn = 1.0f;
+		}
+		k_msleep(1); // yield briefly to other threads
+	}
+}
+#endif
+
 void sensor_scan_thread(void)
 {
 	int err;
 	sys_interface_resume(); // make sure interfaces are enabled
+
+#if SENSOR_IMU_SPI_EXISTS && CONFIG_IMU_SPI_LSM6DSV_RECOVERY
+	// Proactive recovery: customers report the LSM6DSV gets stuck on first
+	// battery-only boot. Send SW_RESET before the first scan to skip the
+	// guaranteed-fail path on affected units.
+	sensor_spi_imu_recovery();
+#endif
+
 	err = sensor_scan(); // IMUs discovery
-	if (err)
+	for (int attempt = 0; attempt < 4 && err; attempt++)
 	{
-		k_msleep(5);
-		LOG_INF("Retrying sensor detection");
+		k_msleep(100);
+		LOG_INF("Retrying sensor detection (attempt %d)", attempt + 1);
 
-		// Reset address before retrying sensor detection
+		// Reset scan state before retry
 		sensor_imu_dev.addr = 0x00;
+		sensor_imu_dev_reg = 0xFF;
 
-		err = sensor_scan(); // on POR, the sensor may not be ready yet
+#if SENSOR_IMU_SPI_EXISTS && CONFIG_IMU_SPI_LSM6DSV_RECOVERY
+		if (attempt == 0) {
+			// First retry: try I2C bit-bang escape route. Most failure-mode
+			// units have the IMU locked in I2C mode, so go to that path early.
+			LOG_INF("Attempting I2C bit-bang recovery");
+			sensor_i2c_imu_recovery();
+		} else {
+			// Subsequent retries: SPI BOOT+SW_RESET (in case I2C escape worked
+			// and the IMU is back on SPI but in a weird register state).
+			sensor_spi_imu_recovery();
+		}
+#endif
+
+		err = sensor_scan();
 	}
+
+#if CONFIG_IMU_LOCKUP_DRAIN_RECOVERY
+	if (err) {
+		// Every recovery path failed — IMU is truly latched and only a
+		// real power-cycle (battery brownout + USB recovery) can unstick it.
+		// Enter drain mode; this function never returns.
+		sensor_drain_mode();
+	}
+#endif
+
 	sys_interface_suspend();
-//	if (err)
-//		return err;
 }
 
 int sensor_scan(void)

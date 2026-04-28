@@ -57,6 +57,19 @@ enum sys_led_pattern {
 	SYS_LED_PATTERN_ERROR_B, // 500ms on 500ms off, 3 times, every 5000ms			// Error
 	SYS_LED_PATTERN_ERROR_C, // 500ms on 500ms off, 4 times, every 5000ms			// Error
 	SYS_LED_PATTERN_ERROR_D, // 500ms on 500ms off (same as SYS_LED_PATTERN_LONG)	// Error
+
+	SYS_LED_PATTERN_DRAIN_PERSIST, // White solid at peak, brief 200ms blink-off
+								   // every 5 s. Used when the IMU is latched
+								   // and the device is intentionally draining
+								   // its battery to force an IMU power-cycle.
+
+	SYS_LED_PATTERN_HARDWARE_ERROR,// Rapid red triple-pulse — IMU/HW failure.
+								   // Reads as urgent / "device is broken".
+	SYS_LED_PATTERN_NO_RECEIVER,   // Orange "phone ring" double-pulse —
+								   // tracker can't reach the receiver
+								   // (transient, not a hardware fault).
+	SYS_LED_PATTERN_RAINBOW_RAMP,  // Pride rainbow cycle — used during
+								   // calibration. Soft, slow, distinctive.
 };
 
 enum sys_led_color {
@@ -65,6 +78,8 @@ enum sys_led_color {
 	SYS_LED_COLOR_ERROR,
 	SYS_LED_COLOR_CHARGING,
 	SYS_LED_COLOR_PAIRING,
+	SYS_LED_COLOR_WARNING,     // Yellow — non-critical "heads up" (low battery etc.)
+	SYS_LED_COLOR_NO_RECEIVER, // Orange — "trying to reach receiver"
 };
 
 void set_led(enum sys_led_pattern led_pattern, int priority);

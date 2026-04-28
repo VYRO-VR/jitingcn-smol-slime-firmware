@@ -63,14 +63,17 @@ static void status_thread(void)
 				   & (SYS_STATUS_SENSOR_ERROR | SYS_STATUS_CONNECTION_ERROR
 					  | SYS_STATUS_SYSTEM_ERROR);
 		if (status & SYS_STATUS_SENSOR_ERROR) {
-			set_led(SYS_LED_PATTERN_ERROR_A, SYS_LED_PRIORITY_STATUS);
+			// Rapid red triple-pulse — IMU/HW failure, customer-actionable
+			set_led(SYS_LED_PATTERN_HARDWARE_ERROR, SYS_LED_PRIORITY_STATUS);
 			k_msleep(5000);
 		}
 		if (status & SYS_STATUS_CONNECTION_ERROR) {
-			set_led(SYS_LED_PATTERN_ERROR_B, SYS_LED_PRIORITY_STATUS);
+			// Orange phone-ring — receiver unreachable, transient
+			set_led(SYS_LED_PATTERN_NO_RECEIVER, SYS_LED_PRIORITY_STATUS);
 			k_msleep(5000);
 		}
 		if (status & SYS_STATUS_SYSTEM_ERROR) {
+			// General firmware error — keep the legacy 4-blink pattern
 			set_led(SYS_LED_PATTERN_ERROR_C, SYS_LED_PRIORITY_STATUS);
 			k_msleep(5000);
 		}

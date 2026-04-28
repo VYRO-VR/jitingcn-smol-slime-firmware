@@ -16,6 +16,7 @@
 
 #include "system.h"
 #include "build_defines.h"
+#include "power.h"
 
 static struct nvs_fs fs;
 
@@ -606,6 +607,10 @@ void sys_reset_mode(uint8_t mode)
 	case 5:
 	case 6: // Reset mode DFU
 #endif
+		if (!vbus_read()) {
+			LOG_INF("DFU requested but USB not connected, ignoring");
+			break;
+		}
 		LOG_INF("DFU requested");
 #if ADAFRUIT_BOOTLOADER
 		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
@@ -617,6 +622,10 @@ void sys_reset_mode(uint8_t mode)
 		break;
 	case 7:
 	case 8: // Reset mode DFU OTA
+		if (!vbus_read()) {
+			LOG_INF("DFU OTA requested but USB not connected, ignoring");
+			break;
+		}
 		LOG_INF("DFU OTA requested");
 #if ADAFRUIT_BOOTLOADER
 		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;

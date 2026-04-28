@@ -719,10 +719,22 @@ static bool composite_try_add_due(struct composite_builder *builder, uint8_t typ
 
 static void send_composite_or_single(const struct composite_builder *builder, uint8_t fallback_type)
 {
+#if CONFIG_CONNECTION_COMPOSITE_PACKETS
 	if (builder->n > 1)
 		send_composite(builder->types, builder->n);
 	else
 		connection_write_packet_type(fallback_type);
+#else
+	/* Composite disabled for receiver-firmware compatibility — send each
+	 * queued sub-packet as its own legacy frame. */
+	if (builder->n == 0) {
+		connection_write_packet_type(fallback_type);
+		return;
+	}
+	for (int i = 0; i < builder->n; i++) {
+		connection_write_packet_type(builder->types[i]);
+	}
+#endif
 }
 
 void connection_thread(void)

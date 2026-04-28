@@ -219,6 +219,51 @@ config DISABLE_SENSOR_GPIOS_ON_SHUTDOWN
 
 endmenu
 
+config CONNECTION_COMPOSITE_PACKETS
+    bool "Send composite multi-sub-packet ESB frames"
+    default y
+    help
+        When enabled, the tracker may bundle multiple low-frequency sub-packets
+        (status, info, runtime) into a single composite ESB frame (type 0xFE)
+        for radio efficiency. Disable this on tracker firmware that needs to
+        be backwards-compatible with older receiver firmware that only knows
+        the legacy single-packet types. With it disabled, each sub-packet is
+        sent as its own ESB frame at the cost of slightly more airtime.
+
+config IMU_LOCKUP_DRAIN_RECOVERY
+    bool "Auto-drain battery on unrecoverable IMU lockup"
+    default n
+    depends on IMU_SPI_LSM6DSV_RECOVERY
+    help
+        When all SPI/I2C IMU recovery paths have been exhausted and the IMU
+        is still completely unresponsive, enter a deliberate battery-drain
+        mode. The Mochi PCB has the LDO RUN pin hardwired to VDD, so there
+        is no firmware-controllable way to power-cycle the IMU once it's
+        latched. Draining the battery until MCU brownout is the only way
+        to force a real POR on the IMU.
+
+        In drain mode the firmware:
+          - Holds R/G/B PWM channels at peak (white) for max LED current
+          - Briefly blinks off every 5 s for visual distinctiveness
+          - Runs the CPU in a tight loop
+          - Lets ESB keep transmitting (more radio current)
+
+        Customer flow: when their tracker goes into solid-white-with-blink,
+        leave it alone for ~1-2 hours until the LED turns off (battery
+        depleted), then plug in USB-C to recover.
+
+config IMU_SPI_LSM6DSV_RECOVERY
+    bool "LSM6DSV SPI state-machine recovery on scan failure"
+    default n
+    help
+        Send LSM6DSV SW_RESET (write 0x01 to CTRL3_C / register 0x12) before
+        retrying SPI IMU detection. Recovers the LSM6DSV from a corrupted
+        SPI state caused by floating CS during MCU boot from battery.
+        Only enable on boards where the SPI IMU is known to be an LSM6DSV
+        (or LSM6DSV-compatible). Other IMUs will receive a write to
+        register 0x12, which is harmless on most but may set unintended
+        config bits on some — do not enable globally.
+
 config SENSOR_ACCEL_ODR
     int "Accelerometer output data rate (Hz)"
     default 100

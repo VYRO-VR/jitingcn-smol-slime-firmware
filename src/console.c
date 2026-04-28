@@ -2,6 +2,7 @@
 #include "system/system.h"
 #include "system/battery_tracker.h"
 #include "system/test_mode.h"
+#include "system/led.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration.h"
 #include "sensor/fusion/vqf/vqf.h"
@@ -9,6 +10,7 @@
 #include "connection/tdma.h"
 #include "build_defines.h"
 #include "zephyr/sys/printk.h"
+#include <string.h>
 
 #if CONFIG_USB_DEVICE_STACK
 #define USB DT_NODELABEL(usbd)
@@ -500,6 +502,11 @@ static void print_help(void)
 	printk("  meow                       Meow!\n");
 	printk("  nvs                        Show NVS usage statistics\n");
 	printk("  help                       Show this help message\n");
+	printk("  led <name>                 Test an LED pattern. Names:\n");
+	printk("    off, on, short, long, flash, poweron, poweroff,\n");
+	printk("    progress, complete, ping, charged, lowbat, charging,\n");
+	printk("    tracking, error1, error2, error3, error4, drain,\n");
+	printk("    hwerror, noreceiver, rainbow\n");
 	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 1s)\n");
 	printk("  range                      Show sensor range statistics (min/max values)\n");
 	printk("  range reset                Reset sensor range statistics\n");
@@ -698,6 +705,7 @@ static void console_thread(void)
 	uint8_t command_scan[] = "scan";
 	uint8_t command_calibrate[] = "calibrate";
 	uint8_t command_help[] = "help";
+	uint8_t command_led[] = "led";
 	uint8_t command_debug[] = "debug";
 	uint8_t command_range[] = "range";
 	uint8_t command_vqfbench[] = "vqfbench";
@@ -782,6 +790,56 @@ static void console_thread(void)
 			sensor_request_scan(true);
 		} else if (memcmp(line, command_calibrate, sizeof(command_calibrate)) == 0) {
 			sensor_request_calibration();
+		} else if (memcmp(line, command_led, sizeof(command_led)) == 0) {
+			if (arg == NULL) {
+				printk("Usage: led <pattern>. Try 'help' for the list.\n");
+			} else if (strcmp((char *)arg, "off") == 0) {
+				set_led(SYS_LED_PATTERN_OFF_FORCE, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "on") == 0) {
+				set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "short") == 0) {
+				set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "long") == 0) {
+				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "flash") == 0) {
+				set_led(SYS_LED_PATTERN_FLASH, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "poweron") == 0) {
+				set_led(SYS_LED_PATTERN_ONESHOT_POWERON, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "poweroff") == 0) {
+				set_led(SYS_LED_PATTERN_ONESHOT_POWEROFF, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "progress") == 0) {
+				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "complete") == 0) {
+				set_led(SYS_LED_PATTERN_ONESHOT_COMPLETE, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "ping") == 0) {
+				set_led(SYS_LED_PATTERN_ONESHOT_PING, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "charged") == 0) {
+				set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "lowbat") == 0) {
+				set_led(SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "charging") == 0) {
+				set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "tracking") == 0) {
+				set_led(SYS_LED_PATTERN_ACTIVE_PERSIST, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "error1") == 0) {
+				set_led(SYS_LED_PATTERN_ERROR_A, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "error2") == 0) {
+				set_led(SYS_LED_PATTERN_ERROR_B, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "error3") == 0) {
+				set_led(SYS_LED_PATTERN_ERROR_C, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "error4") == 0) {
+				set_led(SYS_LED_PATTERN_ERROR_D, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "drain") == 0) {
+				set_led(SYS_LED_PATTERN_DRAIN_PERSIST, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "hwerror") == 0) {
+				set_led(SYS_LED_PATTERN_HARDWARE_ERROR, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "noreceiver") == 0) {
+				set_led(SYS_LED_PATTERN_NO_RECEIVER, SYS_LED_PRIORITY_HIGHEST);
+			} else if (strcmp((char *)arg, "rainbow") == 0) {
+				set_led(SYS_LED_PATTERN_RAINBOW_RAMP, SYS_LED_PRIORITY_HIGHEST);
+			} else {
+				printk("Unknown LED pattern '%s'. Try 'help' for the list.\n", arg);
+			}
 		}
 #if CONFIG_SENSOR_USE_SENS_CALIBRATION
 		else if (memcmp(line, command_sens, sizeof(command_sens)) == 0) {

@@ -912,14 +912,17 @@ static void sensor_calibrate_imu()
 	LOG_INF("Calibrating main accelerometer and gyroscope zero rate offset");
 	LOG_INF("Rest the device on a stable surface");
 
-	set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
+	// Rainbow ramp throughout calibration — looks great, distinct from any
+	// error pattern, tells the customer "I'm setting myself up". 🏳️‍🌈
+	set_led(SYS_LED_PATTERN_RAINBOW_RAMP, SYS_LED_PRIORITY_SENSOR);
 	if (!wait_for_motion(false, 6)) // Wait for accelerometer to settle, timeout 3s
 	{
 		set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_SENSOR);
 		return; // Timeout, calibration failed
 	}
 
-	set_led(SYS_LED_PATTERN_ON, SYS_LED_PRIORITY_SENSOR);
+	// Keep the rainbow going through bias collection — short (~3 s) and the
+	// continuous animation is more reassuring than a solid LED.
 	k_msleep(500); // Delay before beginning acquisition
 
 #if CONFIG_SENSOR_USE_TCAL
