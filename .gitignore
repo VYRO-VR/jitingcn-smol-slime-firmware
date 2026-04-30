@@ -9,3 +9,6 @@ compile_commands.json
 
 # version
 VERSION
+
+# user-supplied UF2 bootloader hex files (see bootloader/README.md)
+/bootloader/*.hex

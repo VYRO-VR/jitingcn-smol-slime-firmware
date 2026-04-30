@@ -108,6 +108,11 @@ endif()
 
 set(SOFTDEVICE_HEX_52840 ${CMAKE_SOURCE_DIR}/softdevice/s140_nrf52_7.3.0_softdevice.hex)
 set(UF2_FAMILY_ID_52840 0xADA52840)
+set(UF2_FAMILY_ID_52833 0xADA52840) # Adafruit UF2 family is shared across nRF52 SoCs
+
+set(zephyr_app_hex ${CMAKE_BINARY_DIR}/zephyr/zephyr.hex)
+set(mergehex_py ${ZEPHYR_BASE}/scripts/build/mergehex.py)
+set(uf2conv_py  ${ZEPHYR_BASE}/scripts/build/uf2conv.py)
 
 if(WITH_SOFTDEVICE)
   if(CONFIG_SOC_NRF52840)
@@ -127,13 +132,91 @@ if(WITH_SOFTDEVICE)
 
     add_custom_command(
       OUTPUT ${sd_merged_hex} ${sd_merged_uf2}
-      COMMAND ${Python3_EXECUTABLE} ${ZEPHYR_BASE}/scripts/build/mergehex.py --overlap=replace -o ${sd_merged_hex} ${sd_softdevice_hex} ${CMAKE_BINARY_DIR}/zephyr/zephyr.hex
-      COMMAND ${Python3_EXECUTABLE} ${ZEPHYR_BASE}/scripts/build/uf2conv.py ${sd_merged_hex} -c -f ${sd_uf2_family_id} -o ${sd_merged_uf2}
-      DEPENDS ${sd_softdevice_hex} ${CMAKE_BINARY_DIR}/zephyr/zephyr.hex
+      COMMAND ${Python3_EXECUTABLE} ${mergehex_py} --overlap=replace -o ${sd_merged_hex} ${sd_softdevice_hex} ${zephyr_app_hex}
+      COMMAND ${Python3_EXECUTABLE} ${uf2conv_py} ${sd_merged_hex} -c -f ${sd_uf2_family_id} -o ${sd_merged_uf2}
+      DEPENDS ${sd_softdevice_hex} ${zephyr_app_hex}
       VERBATIM
     )
 
     add_custom_target(sd_merged_uf2 ALL DEPENDS ${sd_merged_hex} ${sd_merged_uf2})
+  endif()
+endif()
+
+# ============================================================================
+# Combined bootloader + firmware hex (zephyr_full.hex)
+#
+# pm_static reserves the UF2 bootloader region, but nothing is merged into it
+# at build time, so the default zephyr.hex / sysbuild merged.hex contain only
+# the application. Flashing those to a fresh nRF52 chip via SWD/J-Link leaves
+# it without an MBR, without UICR.NRFFW[0], and without the UF2 bootloader,
+# so the device never enumerates over USB.
+#
+# When a UF2 bootloader hex is supplied, this section produces a real combined
+# image (zephyr_full.hex) containing everything needed to flash a virgin chip:
+#
+#     UF2 bootloader (MBR + bootloader code + UICR)
+#   + SoftDevice (when WITH_SOFTDEVICE)
+#   + application
+#
+# Resolution order for the bootloader hex:
+#   1. -DUF2_BOOTLOADER_HEX=<path> at cmake time
+#   2. UF2_BOOTLOADER_HEX environment variable
+#   3. bootloader/<BOARD>.hex   (e.g. bootloader/mochi_uf2.hex)
+#   4. bootloader/<SOC>.hex     (e.g. bootloader/nrf52833.hex)
+#
+# If none of those resolve, zephyr_full.hex is simply not generated and the
+# rest of the build proceeds as before.
+# ============================================================================
+
+if(NOT DEFINED UF2_BOOTLOADER_HEX AND DEFINED ENV{UF2_BOOTLOADER_HEX})
+  set(UF2_BOOTLOADER_HEX $ENV{UF2_BOOTLOADER_HEX})
+endif()
+
+if(NOT DEFINED UF2_BOOTLOADER_HEX OR UF2_BOOTLOADER_HEX STREQUAL "")
+  set(_uf2_bl_candidates
+    ${CMAKE_SOURCE_DIR}/bootloader/${BOARD}.hex
+  )
+  if(CONFIG_SOC_NRF52840)
+    list(APPEND _uf2_bl_candidates ${CMAKE_SOURCE_DIR}/bootloader/nrf52840.hex)
+  elseif(CONFIG_SOC_NRF52833)
+    list(APPEND _uf2_bl_candidates ${CMAKE_SOURCE_DIR}/bootloader/nrf52833.hex)
+  endif()
+  foreach(_c ${_uf2_bl_candidates})
+    if(EXISTS ${_c})
+      set(UF2_BOOTLOADER_HEX ${_c})
+      break()
+    endif()
+  endforeach()
+endif()
+
+if(DEFINED UF2_BOOTLOADER_HEX AND NOT UF2_BOOTLOADER_HEX STREQUAL "")
+  if(NOT EXISTS ${UF2_BOOTLOADER_HEX})
+    message(FATAL_ERROR "UF2_BOOTLOADER_HEX not found: ${UF2_BOOTLOADER_HEX}")
+  endif()
+
+  set(full_hex ${CMAKE_BINARY_DIR}/zephyr/zephyr_full.hex)
+
+  # Order matters with --overlap=replace: later inputs win on overlap.
+  # Bootloader provides MBR + UICR; SoftDevice (if present) replaces MBR
+  # with the Nordic-supplied one; application fills the app region.
+  set(full_inputs ${UF2_BOOTLOADER_HEX})
+  if(WITH_SOFTDEVICE AND DEFINED sd_softdevice_hex)
+    list(APPEND full_inputs ${sd_softdevice_hex})
+  endif()
+  list(APPEND full_inputs ${zephyr_app_hex})
+
+  add_custom_command(
+    OUTPUT ${full_hex}
+    COMMAND ${Python3_EXECUTABLE} ${mergehex_py} --overlap=replace -o ${full_hex} ${full_inputs}
+    DEPENDS ${full_inputs}
+    VERBATIM
+  )
+  add_custom_target(zephyr_full ALL DEPENDS ${full_hex})
+
+  message(STATUS "Combined hex: ${full_hex}")
+  message(STATUS "  bootloader: ${UF2_BOOTLOADER_HEX}")
+  if(WITH_SOFTDEVICE AND DEFINED sd_softdevice_hex)
+    message(STATUS "  softdevice: ${sd_softdevice_hex}")
   endif()
 endif()
 

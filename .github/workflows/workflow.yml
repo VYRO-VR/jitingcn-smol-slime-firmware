@@ -302,7 +302,8 @@ jobs:
             for artifact in \
               "zephyr.hex:${{ matrix.boards.filename }}_OTA.hex" \
               "zephyr_sd.hex:${{ matrix.boards.filename }}.hex" \
-              "zephyr_sd.uf2:${{ matrix.boards.filename }}.uf2"; do
+              "zephyr_sd.uf2:${{ matrix.boards.filename }}.uf2" \
+              "zephyr_full.hex:${{ matrix.boards.filename }}_FULL.hex"; do
               src_name="${artifact%%:*}"
               dst_name="${artifact#*:}"
               src="$REPO_DIR/build/$REPO_DIR/zephyr/$src_name"
@@ -325,6 +326,11 @@ jobs:
                 echo "Not found (skip): $src"
               fi
             done
+            full_src="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr_full.hex"
+            if [ -f "$full_src" ]; then
+              cp "$full_src" "Releases/${{ matrix.boards.filename }}_FULL.hex"
+              echo "Saved: Releases/${{ matrix.boards.filename }}_FULL.hex"
+            fi
           fi
 
       - name: 💾 Upload Artifact - ${{ matrix.boards.boardname }}
