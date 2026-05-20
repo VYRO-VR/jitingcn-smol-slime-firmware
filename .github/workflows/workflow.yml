@@ -78,8 +78,7 @@ jobs:
             git cmake ninja-build gperf dfu-util device-tree-compiler wget
             python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
             xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
-            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
-          version: 1.2
+          version: 1.0
 
       - name: 📦 Cache Zephyr SDK
         id: cache-sdk
@@ -196,8 +195,7 @@ jobs:
             git cmake ninja-build gperf dfu-util device-tree-compiler wget
             python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
             xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
-            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
-          version: 1.2
+          version: 1.0
 
       - name: 📦 Restore Zephyr SDK
         id: restore-sdk
@@ -310,6 +308,17 @@ jobs:
               fi
             done
           fi
+
+      - name: 🧰 Install ARM bare-metal toolchain
+        id: install-arm-toolchain
+        run: |
+          # Plain apt-get (not the apt cache action) so the newlib C headers/libs
+          # that live in transitive deps (e.g. libnewlib-dev, which owns the target
+          # string.h) are pulled in. The cache action only captures named packages.
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+          arm-none-eabi-gcc --version | head -1
 
       - name: 🥾 Build Mochi Bootloader (mochaelec_mochi, no SoftDevice)
         id: build-bootloader
