@@ -362,12 +362,20 @@ jobs:
           APP="$REPO_DIR/build/$REPO_DIR/zephyr/zephyr.hex"
           echo "Bootloader hex: $BL"
           echo "Application hex: $APP"
+          # The SlimeVR/Adafruit (SDK11) bootloader only launches the app when its
+          # settings page (0x7F000 on nRF52833) flags bank_0 == BANK_VALID_APP. That
+          # flag is written by the UF2/DFU update flow, NOT by a raw J-Link flash, so a
+          # plain bootloader+app merge boots into DFU (UF2 drive) instead of the app.
+          # Generate a settings page marking the app valid. bank_0_crc=0 tells the
+          # bootloader to skip the CRC check (treated as valid), matching its own
+          # "stored crc of 0 == CRC checking not used" behaviour.
+          python3 -c "import struct; from intelhex import IntelHex; d=struct.pack('<HHH2x5I',1,0,0,0,0,0,0,0); ih=IntelHex(); ih.frombytes(d,offset=0x7F000); ih.write_hex_file('bl_settings.hex')"
           # mergehex.py ships with the Zephyr workspace; python3 here resolves to the
-          # Zephyr venv (intelhex available). App (0x1000-0x74000) and bootloader/MBR/
-          # UICR regions do not overlap; --overlap=replace matches the SoftDevice merge
-          # already used in CMakeLists.txt.
+          # Zephyr venv (intelhex available). App, bootloader/MBR/UICR, and the settings
+          # page do not overlap; --overlap=replace matches the SoftDevice merge already
+          # used in CMakeLists.txt.
           python3 zephyr/scripts/build/mergehex.py --overlap=replace \
-            -o Releases/Mochi_Tracker_Combined.hex "$BL" "$APP"
+            -o Releases/Mochi_Tracker_Combined.hex "$BL" "$APP" bl_settings.hex
           echo "Combined hex:"
           ls -la Releases/Mochi_Tracker_Combined.hex
 
