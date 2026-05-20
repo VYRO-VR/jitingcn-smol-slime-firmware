@@ -78,8 +78,8 @@ jobs:
             git cmake ninja-build gperf dfu-util device-tree-compiler wget
             python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
             xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
-            gcc-arm-none-eabi libnewlib-arm-none-eabi
-          version: 1.1
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+          version: 1.2
 
       - name: 📦 Cache Zephyr SDK
         id: cache-sdk
@@ -196,8 +196,8 @@ jobs:
             git cmake ninja-build gperf dfu-util device-tree-compiler wget
             python3-dev python3-pip python3-setuptools python3-tk python3-wheel python3-venv
             xz-utils file make gcc gcc-multilib g++-multilib libsdl2-dev libmagic1
-            gcc-arm-none-eabi libnewlib-arm-none-eabi
-          version: 1.1
+            gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+          version: 1.2
 
       - name: 📦 Restore Zephyr SDK
         id: restore-sdk
@@ -322,10 +322,14 @@ jobs:
           git submodule update --init --depth 1
           # `make all` also produces an s140-merged hex and a DFU .zip (the latter
           # needs adafruit-nrfutil). We only want the no-SoftDevice image
-          # (MBR + bootloader), so add a goal that builds just that hex and avoid
-          # the nrfutil dependency.
-          make BOARD=mochaelec_mochi MCU_SUB_VARIANT=nrf52833 \
-            --eval='nosd: $(BUILD)/$(OUT_NAME)_nosd.hex' nosd
+          # (MBR + bootloader). The output filename embeds the bootloader version, so
+          # rather than hardcode it, add a target via a second makefile read AFTER the
+          # main Makefile (so $(BUILD)/$(OUT_NAME) are defined) that depends on the
+          # *_nosd.hex. (A command-line --eval is processed before the Makefile, when
+          # those vars are still empty.)
+          printf 'nosd_only: $(BUILD)/$(OUT_NAME)_nosd.hex\n' > nosd_only.mk
+          make -f Makefile -f nosd_only.mk \
+            BOARD=mochaelec_mochi MCU_SUB_VARIANT=nrf52833 nosd_only
           echo "Bootloader output:"
           ls -la _build/build-mochaelec_mochi/*_nosd.hex
 
