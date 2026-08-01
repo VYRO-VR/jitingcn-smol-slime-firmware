@@ -485,19 +485,17 @@ static void led_thread(void)
 			k_thread_suspend(led_thread_id);
 			break;
 		case SYS_LED_PATTERN_LONG_PERSIST:
-			// Calm low-battery indicator: gentle yellow breath every 3 s.
-			// Yellow (not red) signals "heads up, charge soon" rather than
-			// "critical error". Long rest between breaths so it feels relaxed
-			// — and saves a bit of battery while the battery is already low.
-			// 600 ms breath + 2400 ms rest, peak 25 %.
+			// Low battery: intermittent yellow flash. A crisp 150 ms blip
+			// every 3 s — yellow (not red) signals "heads up, charge soon"
+			// rather than "critical error", and the long rest saves a bit of
+			// battery while the battery is already low.
 			led_pattern_state++;
-			if (led_pattern_state < 60) {
-				led_pin_set(SYS_LED_COLOR_WARNING, 10000,
-							led_breath_value(led_pattern_state, 30, 2500));
-				k_msleep(10);
+			if (led_pattern_state == 1) {
+				led_pin_set(SYS_LED_COLOR_WARNING, 10000, 10000);
+				k_msleep(150);
 			} else {
 				led_pin_set(SYS_LED_COLOR_WARNING, 10000, 0);
-				k_msleep(2400);
+				k_msleep(2850);
 				led_pattern_state = 0;
 			}
 			break;
@@ -589,44 +587,57 @@ static void led_thread(void)
 			break;
 
 		case SYS_LED_PATTERN_HARDWARE_ERROR:
-			// Three rapid red breath-pulses + 800 ms rest. Urgent feel —
-			// reads as "the device itself is broken, contact support".
-			// 60 fast steps + rest = ~1.4 s cycle.
+			// Two fast red flashes (100 ms on / 100 ms off) + 400 ms pause,
+			// repeating. Urgent feel — reads as "the device itself is
+			// broken (e.g. IMU not found), contact support". ~800 ms cycle.
 			led_pattern_state++;
-			if (led_pattern_state <= 60) {
-				int pos = (led_pattern_state - 1) % 20; // 20 steps per pulse
-				int v = pos < 16 ? led_breath_value(pos, 8, 10000) : 0;
-				led_pin_set(SYS_LED_COLOR_ERROR, 10000, v);
-				k_msleep(10);
+			if (led_pattern_state <= 4) {
+				led_pin_set(SYS_LED_COLOR_ERROR, 10000,
+							led_pattern_state % 2 ? 10000 : 0);
+				k_msleep(100);
 			} else {
 				led_pin_set(SYS_LED_COLOR_ERROR, 10000, 0);
-				k_msleep(800);
+				k_msleep(400);
 				led_pattern_state = 0;
 			}
 			break;
 
+		case SYS_LED_PATTERN_CRITICAL_ERROR:
+			// Continuous very fast red flashing (100 ms on / 100 ms off).
+			// Unmistakably "something is badly wrong".
+			led_pattern_state ^= 1;
+			led_pin_set(SYS_LED_COLOR_ERROR, 10000, led_pattern_state ? 10000 : 0);
+			k_msleep(100);
+			break;
+
 		case SYS_LED_PATTERN_NO_RECEIVER:
-			// Two orange "phone-ring" breaths + 2 s rest. Reads as "calling…
-			// calling…" — clearly a connectivity issue, not a device fault.
+			// Three crisp orange blinks (150 ms on / 150 ms off) + ~2 s gap
+			// between each group. Clearly a connectivity issue ("searching
+			// for receiver"), not a device fault.
 			led_pattern_state++;
-			if (led_pattern_state < 30) {
-				// First breath: 300 ms
+			if (led_pattern_state <= 6) {
 				led_pin_set(SYS_LED_COLOR_NO_RECEIVER, 10000,
-							led_breath_value(led_pattern_state, 15, 6000));
-				k_msleep(10);
-			} else if (led_pattern_state < 40) {
-				// 100 ms gap between the two breaths
-				led_pin_set(SYS_LED_COLOR_NO_RECEIVER, 10000, 0);
-				k_msleep(10);
-			} else if (led_pattern_state < 70) {
-				// Second breath
-				int pos = led_pattern_state - 40;
-				led_pin_set(SYS_LED_COLOR_NO_RECEIVER, 10000,
-							led_breath_value(pos, 15, 6000));
-				k_msleep(10);
+							led_pattern_state % 2 ? 10000 : 0);
+				k_msleep(150);
 			} else {
 				led_pin_set(SYS_LED_COLOR_NO_RECEIVER, 10000, 0);
 				k_msleep(2000);
+				led_pattern_state = 0;
+			}
+			break;
+
+		case SYS_LED_PATTERN_DFU:
+			// DFU/OTA update mode: fast yellow pulse (100 ms breath +
+			// 100 ms rest = 5 Hz). Fast enough to read as "busy updating,
+			// do not power off".
+			led_pattern_state++;
+			if (led_pattern_state < 10) {
+				led_pin_set(SYS_LED_COLOR_WARNING, 10000,
+							led_breath_value(led_pattern_state, 5, 10000));
+				k_msleep(10);
+			} else {
+				led_pin_set(SYS_LED_COLOR_WARNING, 10000, 0);
+				k_msleep(100);
 				led_pattern_state = 0;
 			}
 			break;
