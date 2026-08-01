@@ -71,18 +71,19 @@ static void status_thread(void)
 	{
 		int status = status_state & STATUS_LED_ERROR_MASK;
 		if (status & SYS_STATUS_SENSOR_ERROR) {
-			// Rapid red triple-pulse — IMU/HW failure, customer-actionable
+			// Two fast red flashes + quick pause — IMU/HW failure (e.g.
+			// IMU not found), customer-actionable
 			set_led(SYS_LED_PATTERN_HARDWARE_ERROR, SYS_LED_PRIORITY_STATUS);
 			(void)k_sem_take(&status_wake_sem, K_MSEC(5000));
 		}
 		if (status & SYS_STATUS_CONNECTION_ERROR) {
-			// Orange phone-ring — receiver unreachable, transient
+			// 3 orange blinks, ~2s gap — receiver unreachable, transient
 			set_led(SYS_LED_PATTERN_NO_RECEIVER, SYS_LED_PRIORITY_STATUS);
 			(void)k_sem_take(&status_wake_sem, K_MSEC(5000));
 		}
 		if (status & SYS_STATUS_SYSTEM_ERROR) {
-			// General firmware error — keep the legacy 4-blink pattern
-			set_led(SYS_LED_PATTERN_ERROR_C, SYS_LED_PRIORITY_STATUS);
+			// General critical error — continuous fast red flashing
+			set_led(SYS_LED_PATTERN_CRITICAL_ERROR, SYS_LED_PRIORITY_STATUS);
 			(void)k_sem_take(&status_wake_sem, K_MSEC(5000));
 		}
 		if (!status) {

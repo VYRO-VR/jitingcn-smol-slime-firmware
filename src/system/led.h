@@ -48,9 +48,9 @@ enum sys_led_pattern {
 	SYS_LED_PATTERN_ONESHOT_PING,     // 200ms on 200ms off, 10 times				// Ping
 
 	SYS_LED_PATTERN_ON_PERSIST,     // 20% duty cycle									// Success | indicates charged
-	SYS_LED_PATTERN_LONG_PERSIST,   // 20% duty cycle, 500ms on 500ms off				// Charging| indicates low battery
+	SYS_LED_PATTERN_LONG_PERSIST,   // Intermittent yellow flash every 3s			// Warning | indicates low battery
 	SYS_LED_PATTERN_PULSE_PERSIST,  // 5000ms pulsing								// Charging| indicates charging
-	SYS_LED_PATTERN_ACTIVE_PERSIST, // 300ms on 9700ms off							// Default | indicates normal
+	SYS_LED_PATTERN_ACTIVE_PERSIST, // Purple blip every 10s							// Default | indicates normal
 									// operation
 
 	SYS_LED_PATTERN_ERROR_A, // 500ms on 500ms off, 2 times, every 5000ms			// Error
@@ -63,11 +63,15 @@ enum sys_led_pattern {
 								   // and the device is intentionally draining
 								   // its battery to force an IMU power-cycle.
 
-	SYS_LED_PATTERN_HARDWARE_ERROR,// Rapid red triple-pulse — IMU/HW failure.
-								   // Reads as urgent / "device is broken".
-	SYS_LED_PATTERN_NO_RECEIVER,   // Orange "phone ring" double-pulse —
-								   // tracker can't reach the receiver
-								   // (transient, not a hardware fault).
+	SYS_LED_PATTERN_HARDWARE_ERROR,// Two fast red flashes + quick pause,
+								   // repeating — IMU/HW failure (e.g. IMU
+								   // not found). Urgent, "device is broken".
+	SYS_LED_PATTERN_CRITICAL_ERROR,// Continuous very fast red flashing —
+								   // general critical/system error.
+	SYS_LED_PATTERN_NO_RECEIVER,   // 3 orange blinks, ~2s gap between each
+								   // group — tracker can't reach the
+								   // receiver (transient, not a HW fault).
+	SYS_LED_PATTERN_DFU,           // Fast yellow pulse — DFU/OTA update mode.
 	SYS_LED_PATTERN_RAINBOW_RAMP,  // Pride rainbow cycle — used during
 								   // calibration. Soft, slow, distinctive.
 };

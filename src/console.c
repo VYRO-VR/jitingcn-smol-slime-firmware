@@ -571,7 +571,7 @@ static void print_help(void)
 	printk("    off, on, short, long, flash, poweron, poweroff,\n");
 	printk("    progress, complete, ping, charged, lowbat, charging,\n");
 	printk("    tracking, error1, error2, error3, error4, drain,\n");
-	printk("    hwerror, noreceiver, rainbow\n");
+	printk("    hwerror, criterror, noreceiver, dfu, rainbow\n");
 	printk("  debug [duration]           Start sensor debug mode at FIFO rate (1-60s, default 1s)\n");
 	printk("  range                      Show sensor range statistics (min/max values)\n");
 	printk("  range reset                Reset sensor range statistics\n");
@@ -909,8 +909,12 @@ static void console_cmd_led(size_t argc, char **argv)
 		set_led(SYS_LED_PATTERN_DRAIN_PERSIST, SYS_LED_PRIORITY_HIGHEST);
 	} else if (strcmp(arg, "hwerror") == 0) {
 		set_led(SYS_LED_PATTERN_HARDWARE_ERROR, SYS_LED_PRIORITY_HIGHEST);
+	} else if (strcmp(arg, "criterror") == 0) {
+		set_led(SYS_LED_PATTERN_CRITICAL_ERROR, SYS_LED_PRIORITY_HIGHEST);
 	} else if (strcmp(arg, "noreceiver") == 0) {
 		set_led(SYS_LED_PATTERN_NO_RECEIVER, SYS_LED_PRIORITY_HIGHEST);
+	} else if (strcmp(arg, "dfu") == 0) {
+		set_led(SYS_LED_PATTERN_DFU, SYS_LED_PRIORITY_HIGHEST);
 	} else if (strcmp(arg, "rainbow") == 0) {
 		set_led(SYS_LED_PATTERN_RAINBOW_RAMP, SYS_LED_PRIORITY_HIGHEST);
 	} else {
