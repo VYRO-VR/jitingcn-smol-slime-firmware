@@ -590,12 +590,21 @@ bool sensor_is_initialized(void)
 	return sensor_sensor_init;
 }
 
+// The QMC6309H shares the QMC6309 chip ID; only the I2C address tells them apart
+static const char *mag_display_name(int mag_id, uint16_t addr)
+{
+	if (mag_id == MAG_QMC6309 && (addr & 0x7F) == 0x0C) {
+		return "QMC6309H";
+	}
+	return dev_mag_names[mag_id];
+}
+
 const char *sensor_get_sensor_mag_name(void)
 {
 	if (sensor_mag_id < 0) {
 		return "None";
 	}
-	return dev_mag_names[sensor_mag_id];
+	return mag_display_name(sensor_mag_id, sensor_mag_dev.addr);
 }
 
 const char *sensor_get_sensor_fusion_name(void)
@@ -1242,7 +1251,7 @@ int sensor_scan(void)
 	} else if (mag_id < 0) {
 		LOG_WRN("No magnetometer detected");
 	} else {
-		LOG_INF("Found %s", dev_mag_names[mag_id]);
+		LOG_INF("Found %s", mag_display_name(mag_id, sensor_mag_dev.addr));
 	}
 	if (mag_id >= 0) // if there is no magnetometer we do not care as much
 	{

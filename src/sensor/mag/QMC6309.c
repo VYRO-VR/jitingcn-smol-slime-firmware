@@ -50,8 +50,8 @@
 #define RNG_8G 0b10
 #define RNG_MASK(rng) ((rng) << 2)
 
-#define ODR_1Hz  0b000
-#define ODR_10Hz  0b001
+#define ODR_1Hz  0b000 // reserved on QMC6309H, do not use
+#define ODR_10Hz  0b001 // reserved on QMC6309H, do not use
 #define ODR_50Hz  0b010
 #define ODR_100Hz 0b011
 #define ODR_200Hz 0b100
@@ -127,20 +127,12 @@ int qmc_update_odr(float time, float *actual_time)
 		MODR = ODR_100Hz;
 		time = 1.f / 100;
 	}
-	else if (ODR > 25)
-	{
-		MODR = ODR_50Hz;
-		time = 1.f / 50;
-	}
-	else if (ODR > 5)
-	{
-		MODR = ODR_10Hz;
-		time = 1.f / 10;
-	}
 	else
 	{
-		MODR = ODR_1Hz;
-		time = 1.f;
+		// 50Hz is the lowest rate valid on both variants: the QMC6309H reserves
+		// the 1Hz and 10Hz ODR codes, and the chip ID cannot tell the variants apart
+		MODR = ODR_50Hz;
+		time = 1.f / 50;
 	}
 
 	uint8_t STAT = ODR_MASK(MODR) | MD;
