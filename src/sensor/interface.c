@@ -80,6 +80,11 @@ void sensor_interface_register_sensor_imu_i2c(struct i2c_dt_spec *dev)
 	sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_IMU] = SENSOR_INTERFACE_SPEC_I2C;
 }
 
+bool sensor_interface_imu_is_i2c(void)
+{
+	return sensor_interface_dev_spec[SENSOR_INTERFACE_DEV_IMU] == SENSOR_INTERFACE_SPEC_I2C;
+}
+
 void sensor_interface_register_sensor_mag_spi(struct spi_dt_spec *dev)
 {
 	sensor_interface_dev_spi[SENSOR_INTERFACE_DEV_MAG] = dev;
@@ -145,6 +150,13 @@ void sensor_interface_ext_configure(const sensor_ext_ssi_t *ext)
 const sensor_ext_ssi_t *sensor_interface_ext_get(void)
 {
 	return ext_ssi;
+}
+
+enum sensor_interface_spec sensor_interface_get_spec(enum sensor_interface_dev dev)
+{
+	if (dev < 0 || dev >= SENSOR_INTERFACE_DEV_COUNT)
+		return SENSOR_INTERFACE_SPEC_SPI; // safe default
+	return sensor_interface_dev_spec[dev];
 }
 
 // TODO: spi config by device

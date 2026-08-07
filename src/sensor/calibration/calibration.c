@@ -27,6 +27,8 @@
 #include "util.h"
 
 #include <math.h>
+#include <string.h>
+#include <zephyr/irq.h>
 
 #if CONFIG_CMSIS_DSP
 #include <arm_math.h>
@@ -59,6 +61,12 @@ float magBAinv[4][3];
 K_MUTEX_DEFINE(calibration_request_lock);
 static int requested_calibration;
 static K_SEM_DEFINE(calibration_wake_sem, 0, 1);
+
+/* Also occupies request slot so IMU/TCal/sens cannot overlap magneto_progress collection. */
+#define CAL_REQUEST_MAG 6
+
+/* Identify LED on cal thread — never k_msleep on ESB/connection. */
+static bool mag_cal_led_pending;
 
 static void calibration_signal_wake(void)
 {
@@ -93,7 +101,7 @@ static void calibration_thread(void);
 // Keep background calibration below the sensor loop so trial Magneto solves do
 // not preempt FIFO servicing. This makes online/manual calibration a little less
 // eager, but avoids sensor-loop timing regressions from background work.
-K_THREAD_DEFINE(calibration_thread_id, 4096, calibration_thread, NULL, NULL, NULL, 8, 0, 0);
+K_THREAD_DEFINE(calibration_thread_id, 4096, calibration_thread, NULL, NULL, NULL, CALIBRATION_THREAD_PRIORITY, K_FP_REGS, 0);
 
 void sensor_calibration_process_accel(float a[3])
 {
@@ -113,47 +121,36 @@ void sensor_calibration_process_gyro(float g[3])
 {
 	sensor_sample_gyro(g);
 #if CONFIG_SENSOR_USE_TCAL
-	float calculated_offset[3] = {0.0f, 0.0f, 0.0f};
-	float temp = sensor_get_current_imu_temperature();
+	float calculated_offset[3];
 	bool offset_calculated = false;
 
-	// Feed raw gyro data into continuous bucket accumulator for auto T-Cal
-	// This must happen before bias subtraction so we capture the true raw bias
-	// (auto-cal collection continues regardless of compensation enable state)
-	if (sensor_tcal_get_auto_calibration() && !isnan(temp)) {
+	const bool auto_cal = sensor_tcal_get_auto_calibration();
+	const bool curve_ready = sensor_tcal_curve_apply_ready();
+	float temp = NAN;
+	if (auto_cal || curve_ready) {
+		temp = sensor_get_current_imu_temperature();
+	}
+
+	/* Continuous collect only when auto-cal on. */
+	if (auto_cal) {
 		sensor_tcal_feed_continuous_sample(g, temp);
 	}
 
-	// ==========================================================================
-	// Unified T-Cal Strategy: LUT -> MLS -> Static Bias
-	// D_offset is always applied when valid
-	// Skipped when T-Cal compensation disabled (uses static bias instead)
-	// ==========================================================================
-
-	if (sensor_tcal_get_enabled() && !isnan(temp) && retained->tempCalState.count >= 1) {
-		// Strategy 1: Try LUT lookup (preferred - O(1) linear interpolation)
-		if (retained->tempCalState.count >= MLS_MIN_POINTS_FOR_FIT) {
-			if (sensor_tcal_lut_lookup(temp, calculated_offset) == 0) {
-				offset_calculated = true;
-			}
-			// Strategy 2: Fallback to MLS if LUT not available
-			else if (sensor_tcal_mls_lookup(temp, calculated_offset) == 0) {
-				offset_calculated = true;
-			}
+	/* Cached enable∧points≥min — LUT/MLS; else ZRO below. */
+	if (curve_ready) {
+		if (sensor_tcal_lut_lookup(temp, calculated_offset) == 0) {
+			offset_calculated = true;
+		} else if (sensor_tcal_mls_lookup(temp, calculated_offset) == 0) {
+			offset_calculated = true;
 		}
 	}
 
-	// Strategy 2: Final fallback to static bias (when no T-Cal data or compensation disabled)
 	if (!offset_calculated) {
-		for (int i = 0; i < 3; i++) {
-			calculated_offset[i] = gyroBias[i];
-		}
-		// Note: offset_calculated remains false but we still apply D_offset below
+		calculated_offset[0] = gyroBias[0];
+		calculated_offset[1] = gyroBias[1];
+		calculated_offset[2] = gyroBias[2];
 	}
 
-	// Apply boot/runtime calibration D_offset
-	// D_offset is now applied regardless of whether T-Cal is used or not
-	// This allows runtime bias tracking even without temperature calibration
 	if (retained->bootCalState.doffset_valid) {
 #if CONFIG_CMSIS_DSP
 		arm_add_f32(calculated_offset, retained->bootCalState.doffset, calculated_offset, 3);
@@ -164,7 +161,6 @@ void sensor_calibration_process_gyro(float g[3])
 #endif
 	}
 
-	// Apply the calculated offset to gyro data
 #if CONFIG_CMSIS_DSP
 	arm_sub_f32(g, calculated_offset, g, 3);
 #else
@@ -190,7 +186,12 @@ void sensor_calibration_process_mag(float m[3])
 	//	for (int i = 0; i < 3; i++)
 	//		m[i] -= magBias[i];
 	sensor_sample_mag(m);
-	apply_BAinv(m, magBAinv);
+	/* Snap under irq_lock so calibration_thread publish cannot tear the live matrix. */
+	float snap[4][3];
+	unsigned key = irq_lock();
+	memcpy(snap, magBAinv, sizeof(snap));
+	irq_unlock(key);
+	apply_BAinv(m, snap);
 }
 
 void sensor_calibration_update_sensor_ids(int imu)
@@ -214,7 +215,11 @@ void sensor_calibration_read(void)
 	memcpy(accelBias, retained->accelBias, sizeof(accelBias));
 	memcpy(gyroBias, retained->gyroBias, sizeof(gyroBias));
 	memcpy(magBias, retained->magBias, sizeof(magBias));
-	memcpy(magBAinv, retained->magBAinv, sizeof(magBAinv));
+	{
+		unsigned key = irq_lock();
+		memcpy(magBAinv, retained->magBAinv, sizeof(magBAinv));
+		irq_unlock(key);
+	}
 	memcpy(accBAinv, retained->accBAinv, sizeof(accBAinv));
 	if (retained->mag_online_calibration_mode > MAG_ONLINE_CALIBRATION_DISABLED) {
 		retained->mag_online_calibration_mode = MAG_ONLINE_CALIBRATION_DEFAULT;
@@ -293,17 +298,7 @@ int sensor_calibration_validate_mag(float m_inv[][3], bool write)
 	if (m_inv == NULL) {
 		m_inv = magBAinv;
 	}
-	float zero[3] = {0};
-	float diagonal[3];
-	for (int i = 0; i < 3; i++) {
-		diagonal[i] = m_inv[i + 1][i];
-	}
-	float magnitude = v_avg(diagonal);
-	float average[3] = {magnitude, magnitude, magnitude};
-	float max_gain = MAX(MAX(fabsf(diagonal[0]), fabsf(diagonal[1])), fabsf(diagonal[2]));
-	if (!v_epsilon(m_inv[0], zero, magnitude * 2.0f) || !v_epsilon(diagonal, average, MAX(magnitude * 0.2f, 0.1f))
-		|| max_gain > MAG_CAL_MAX_AXIS_GAIN) // check offset, diagonal spread, and reject huge-gain fits
-	{
+	if (!mag_bainv_structurally_ok(m_inv, 0.0f)) {
 		sensor_calibration_clear_mag(m_inv, write);
 		LOG_WRN("Invalidated calibration");
 		LOG_WRN("The magnetometer may be damaged or calibration was not completed properly");
@@ -364,9 +359,13 @@ void sensor_calibration_clear_mag(float m_inv[][3], bool write)
 	if (m_inv == NULL) {
 		m_inv = magBAinv;
 	}
-	memset(m_inv, 0, sizeof(magBAinv)); // zeroed matrix will disable magnetometer in fusion
 	if (clearing_live_state) {
+		unsigned key = irq_lock();
+		memset(m_inv, 0, sizeof(magBAinv)); // zeroed matrix will disable magnetometer in fusion
+		irq_unlock(key);
 		magneto_online_runtime_reset();
+	} else {
+		memset(m_inv, 0, sizeof(magBAinv));
 	}
 	if (write) {
 		LOG_INF("Clearing stored calibration data");
@@ -396,7 +395,7 @@ int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions)
 	}
 
 	k_mutex_lock(&calibration_request_lock, K_FOREVER);
-	if (requested_calibration != 0) {
+	if (requested_calibration != 0 || (magneto_progress & 0x80)) {
 		k_mutex_unlock(&calibration_request_lock);
 		LOG_ERR("Sensor calibration is already running");
 		return -1;
@@ -413,35 +412,29 @@ int sensor_request_calibration_sens(uint8_t axis, uint16_t revolutions)
 
 void sensor_request_calibration_mag(void)
 {
-	// If already collecting, just check if ready
-	if (magneto_progress & 0x80) {
+	k_mutex_lock(&calibration_request_lock, K_FOREVER);
+	if (magneto_progress & 0x80 || mag_cal_led_pending) {
+		k_mutex_unlock(&calibration_request_lock);
 		if (!get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 		}
 		return;
 	}
+	if (requested_calibration != 0) {
+		k_mutex_unlock(&calibration_request_lock);
+		LOG_ERR("Sensor calibration is already running");
+		return;
+	}
+	/* Claim slot immediately; LED + magneto_progress arm on cal thread. */
+	requested_calibration = CAL_REQUEST_MAG;
+	mag_cal_led_pending = true;
+	k_mutex_unlock(&calibration_request_lock);
 
 	if (!get_status(SYS_STATUS_CALIBRATION_RUNNING)) {
 		set_status(SYS_STATUS_CALIBRATION_RUNNING, true);
 	}
-
-	// LED sequence before calibration:
-	// 1. Flash LED to let user identify tracker
-	LOG_INF("Magnetometer calibration: identify tracker");
-	set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
-	k_msleep(2000); // Wait for pattern to complete
-
-	// 2. Flash twice to indicate calibration is starting
-	//    SYS_LED_PATTERN_ONESHOT_PROGRESS: 200ms on + 200ms off, 2 times = 800ms
-	set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
-	k_msleep(800);
-
-	// Start fresh calibration
-	magneto_reset();            // Clear ata / progress / status-log timer
-	magneto_online_reset();     // Clear online accumulator
-	magneto_progress |= 1 << 7; // Set collection active flag
 	calibration_signal_wake();
-	LOG_INF("Magnetometer calibration started (rotate tracker in all orientations)");
+	LOG_INF("Magnetometer calibration requested");
 }
 
 
@@ -453,13 +446,14 @@ int sensor_calibration_request(int id)
 	switch (id) {
 	case -1:
 		requested_calibration = 0;
+		mag_cal_led_pending = false;
 		result = 0;
 		break;
 	case 0:
 		result = requested_calibration;
 		break;
 	default:
-		if (requested_calibration != 0) {
+		if (requested_calibration != 0 || (magneto_progress & 0x80)) {
 			LOG_ERR("Sensor calibration is already running");
 			result = -1;
 		} else {
@@ -582,10 +576,34 @@ static void calibration_thread(void)
 			set_status(SYS_STATUS_CALIBRATION_RUNNING, false);
 			break;
 #endif
-		default:
+		case CAL_REQUEST_MAG:
+			if (mag_cal_led_pending) {
+				mag_cal_led_pending = false;
+				LOG_INF("Magnetometer calibration: identify tracker");
+				set_led(SYS_LED_PATTERN_LONG, SYS_LED_PRIORITY_SENSOR);
+				watchdog_feed(WDT_CHANNEL_CALIBRATION);
+				k_msleep(2000);
+				watchdog_feed(WDT_CHANNEL_CALIBRATION);
+				set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_SENSOR);
+				k_msleep(800);
+				watchdog_feed(WDT_CHANNEL_CALIBRATION);
+				magneto_reset();
+				magneto_online_reset();
+				magneto_progress |= 1 << 7;
+				LOG_INF("Magnetometer calibration started (rotate tracker in all orientations)");
+				break;
+			}
 			if (magneto_progress & 0b10000000) {
 				requested = sensor_calibrate_mag();
+				/* 1 = still collecting; 0/-1 = finished or aborted */
+				if (requested != 1) {
+					sensor_calibration_request(-1);
+				}
+			} else {
+				sensor_calibration_request(-1);
 			}
+			break;
+		default:
 			break;
 		}
 
@@ -625,6 +643,19 @@ static void calibration_thread(void)
 void sensor_tcal_status(void)
 {
 	printk("Temperature Calibration Status (MLS):\n");
+	printk(
+		"  - Compensation flag: %s\n",
+		sensor_tcal_get_enabled() ? "enabled (default on)" : "disabled"
+	);
+	printk(
+		"  - Active apply: %s",
+		sensor_tcal_get_apply_mode_name()
+	);
+	if (sensor_tcal_get_apply_mode() == SENSOR_TCAL_APPLY_ZRO_FALLBACK) {
+		printk(" (need >= %d points for curve)\n", MLS_MIN_POINTS_FOR_FIT);
+	} else {
+		printk("\n");
+	}
 	printk("  - MLS available: %s\n", retained->tempCalState.valid ? "Yes" : "No");
 	printk("  - Points collected: %u / %d\n", retained->tempCalState.count, TCAL_BUFFER_SIZE);
 
@@ -786,6 +817,7 @@ void sensor_tcal_clear(void)
 
 	// Reset continuous accumulator sampling state
 	tcal_accum_reset();
+	sensor_tcal_refresh_apply_cache();
 
 	// Manual command: invalidate fusion to force quaternion recalculation
 	sensor_fusion_invalidate();
@@ -829,7 +861,8 @@ void sensor_tcal_remove_point(int index_to_remove)
 		retained->tempCalState.valid = false;
 
 		printk("Point at index %d removed. Recalculating MLS state...\n", index_to_remove);
-		update_tcal_state(); // Refresh and save
+		update_tcal_state();
+		sys_flush_warm(); /* console/user action: durable immediately */
 	} else {
 		printk("No data found at index %d. Nothing to remove.\n", index_to_remove);
 	}
