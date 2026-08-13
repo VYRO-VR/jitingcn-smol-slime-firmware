@@ -331,6 +331,11 @@ config IMU_LOCKUP_DRAIN_RECOVERY
 config IMU_SPI_LSM6DSV_RECOVERY
     bool "LSM6DSV SPI state-machine recovery on scan failure"
     default n
+    # The recovery path (and the drain mode that depends on it) drives SPIM3
+    # and nRF52-layout GPIO/POWER/CLOCK registers directly, which only exist
+    # on nRF52833/nRF52840. On other SoCs the global prj.conf enable is
+    # dropped here instead of breaking the build.
+    depends on SOC_NRF52833 || SOC_NRF52840
     help
         Send LSM6DSV SW_RESET (write 0x01 to CTRL3_C / register 0x12) before
         retrying SPI IMU detection. Recovers the LSM6DSV from a corrupted
