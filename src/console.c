@@ -22,9 +22,19 @@
 #define USB_EXISTS (DT_NODE_HAS_STATUS(USB, okay) && CONFIG_UART_CONSOLE)
 #endif
 
-#if (USB_EXISTS || CONFIG_RTT_CONSOLE) && CONFIG_USE_SLIMENRF_CONSOLE
+/*
+ * Interactive console over the chosen console device when it is a plain
+ * (non-USB) UART, for example a UART bridged by an onboard USB-to-serial
+ * chip. The console thread then starts at boot and uses console_getline(),
+ * same as the USB path, but without the USB lifecycle handling.
+ */
+#define UART_CONSOLE_EXISTS \
+	(!USB_EXISTS && CONFIG_UART_CONSOLE && \
+	 DT_NODE_HAS_STATUS(DT_CHOSEN(zephyr_console), okay))
 
-#if USB_EXISTS
+#if (USB_EXISTS || UART_CONSOLE_EXISTS || CONFIG_RTT_CONSOLE) && CONFIG_USE_SLIMENRF_CONSOLE
+
+#if USB_EXISTS || UART_CONSOLE_EXISTS
 #include <zephyr/console/console.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/drivers/uart.h>
@@ -84,13 +94,8 @@ static void console_lifecycle_work_handler(struct k_work *work)
 K_THREAD_DEFINE(console_thread_id, 2048, console_thread, NULL, NULL, NULL, CONSOLE_THREAD_PRIORITY, 0, 0);
 #endif
 
-#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER)
-#define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
-#define NRF5_BOOTLOADER CONFIG_BOARD_HAS_NRF5_BOOTLOADER
-
-#if NRF5_BOOTLOADER
-static const struct device *gpio_dev = DEVICE_DT_GET(DT_NODELABEL(gpio0));
-#endif
+#define DFU_EXISTS (CONFIG_BUILD_OUTPUT_UF2 || CONFIG_BOARD_HAS_NRF5_BOOTLOADER || CONFIG_BOOTLOADER_MCUBOOT)
+#define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(mag), okay)
 #define SENSOR_MAG_EXISTS true
@@ -1445,6 +1450,7 @@ static void console_cmd_dfu(size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
 	char *arg = argc > 1 ? argv[1] : NULL;
+	bool ota = false;
 
 #if ADAFRUIT_BOOTLOADER
 	// Subcommands:
@@ -1453,24 +1459,24 @@ static void console_cmd_dfu(size_t argc, char **argv)
 	char *mode = arg;
 
 	if (mode && strcmp(mode, "ota") == 0) {
+		ota = true;
 		printk("Entering OTA DFU (BLE)...\n");
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_OTA_RESET;
 	} else if (mode == NULL) {
 		printk("Entering UF2 DFU...\n");
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 	} else {
 		printk("Error: Unknown DFU mode '%s'. Use: dfu [ota]\n", mode);
 		return;
 	}
 
-	k_msleep(100); // Wait for GPREGRET to be written
-	sys_request_system_reboot(false);
 #else
-	ARG_UNUSED(arg);
+	if (arg != NULL) {
+		printk("Error: This bootloader does not support a DFU mode argument\n");
+		return;
+	}
 #endif
-#if NRF5_BOOTLOADER
-	gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-#endif
+
+	printk("Entering DFU bootloader...\n");
+	sys_enter_dfu(ota);
 }
 #endif
 
@@ -1661,17 +1667,11 @@ static void console_thread(void)
 #if USB_EXISTS && DFU_EXISTS
 	if (button_read()) // button held on usb connect, enter DFU
 	{
-#if ADAFRUIT_BOOTLOADER
-		NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
-		sys_request_system_reboot(false);
-#endif
-#if NRF5_BOOTLOADER
-		gpio_pin_configure(gpio_dev, 19, GPIO_OUTPUT | GPIO_OUTPUT_INIT_LOW);
-#endif
+		sys_enter_dfu(false);
 	}
 #endif
 
-#if USB_EXISTS
+#if USB_EXISTS || UART_CONSOLE_EXISTS
 	console_getline_init();
 
 	// Wait for any pending log data to be processed
@@ -1679,6 +1679,7 @@ static void console_thread(void)
 		k_usleep(1);
 	}
 
+#if USB_EXISTS
 	// Wait for USB CDC to be ready by checking DTR (Data Terminal Ready) signal
 	// This ensures the terminal is actually connected and ready to receive data
 	const struct device *uart_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
@@ -1697,13 +1698,14 @@ static void console_thread(void)
 
 	printk("*** " CONFIG_SLIMEVR_USB_DEVICE_MANUFACTURER " " CONFIG_SLIMEVR_USB_DEVICE_PRODUCT " ***\n");
 #endif
+#endif
 	printk(FW_STRING);
 	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);
 
 	printk("Type 'help' to show available commands.\n");
 
 	while (1) {
-#if USB_EXISTS
+#if USB_EXISTS || UART_CONSOLE_EXISTS
 		char *line = console_getline();
 #else
 		char *line = rtt_console_getline();

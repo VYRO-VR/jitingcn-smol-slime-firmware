@@ -17,11 +17,15 @@
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_power.h>
 #include <zephyr/pm/device.h>
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+#include <zephyr/dfu/mcuboot.h>
+#endif
 #include <zephyr/device.h>
 #include <hal/nrf_spim.h>
 #include <hal/nrf_twim.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <stdint.h>
+#include <errno.h>
 
 #include "power.h"
 #include "power_battery.h"
@@ -110,7 +114,7 @@ static const struct gpio_dt_spec vcc = GPIO_DT_SPEC_GET(ZEPHYR_USER_NODE, vcc_gp
 #pragma message "VCC GPIO does not exist"
 #endif
 
-#define ADAFRUIT_BOOTLOADER CONFIG_BUILD_OUTPUT_UF2
+#define ADAFRUIT_BOOTLOADER (CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT)
 
 /* CS/VCC -> Hi-Z (GPIO_DISCONNECTED); pwr enable -> driven inactive. */
 static void sys_disconnect_interface_pins(void)
@@ -194,6 +198,8 @@ static void configure_system_off(void)
 		LOG_WRN("Entering new power state while sensor error is raised");
 	if (get_status(SYS_STATUS_SYSTEM_ERROR))
 		LOG_WRN("Entering new power state while system error is raised");
+	/* Freeze online-mag commits before the final warm-NVS flush. */
+	sensor_calibration_online_mag_prepare_power_down();
 	clock_pre_shutdown();
 	main_imu_suspend();
 	sensor_shutdown();
@@ -534,6 +540,16 @@ static void power_thread(void)
 		 */
 		if (!boot_success_checked && k_uptime_get() > 60000) {
 			boot_success_checked = true;
+#if defined(CONFIG_BOOTLOADER_MCUBOOT)
+			if (!boot_is_img_confirmed()) {
+				int err = boot_write_img_confirmed();
+				if (err) {
+					LOG_ERR("Failed to confirm MCUboot image: %d", err);
+				} else {
+					LOG_INF("MCUboot test image confirmed");
+				}
+			}
+#endif
 			watchdog_mark_boot_success();
 		}
 
@@ -567,6 +583,11 @@ static void power_thread(void)
 		bool docked = dock_read();
 		bool charging = chg_read();
 		bool charged = stby_read();
+		bool pmic_plugged = false;
+		int charger_state_err = battery_charger_state(&pmic_plugged, &charging, &charged);
+		if (charger_state_err != 0 && charger_state_err != -ENOTSUP) {
+			LOG_WRN("Failed to read charger state: %d", charger_state_err);
+		}
 
 		int battery_mV;
 		int16_t battery_pptt = read_batt_mV(&battery_mV);
@@ -587,7 +608,7 @@ static void power_thread(void)
 		bool usb_plugged = false;
 #endif
 		int64_t now_ms = k_uptime_get();
-		bool raw_device_plugged = charging || charged || plugged || usb_plugged;
+		bool raw_device_plugged = charging || charged || plugged || usb_plugged || pmic_plugged;
 		bool plug_state_debouncing = power_battery_update_plugged_state(raw_device_plugged, now_ms);
 		bool plug_signal_settling = power_battery_plug_signal_settling(plug_state_debouncing, now_ms);
 		int32_t average_pptt = power_battery_average_pptt();
@@ -640,7 +661,7 @@ static void power_thread(void)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else if (charged)
 			set_led(SYS_LED_PATTERN_ON_PERSIST, SYS_LED_PRIORITY_SYSTEM);
-		else if (plugged || usb_plugged)
+		else if (plugged || usb_plugged || pmic_plugged)
 			set_led(SYS_LED_PATTERN_PULSE_PERSIST, SYS_LED_PRIORITY_SYSTEM);
 		else if (power_battery_is_low())
 			set_led(SYS_LED_PATTERN_LONG_PERSIST, SYS_LED_PRIORITY_SYSTEM);
