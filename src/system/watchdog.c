@@ -22,14 +22,21 @@
 
 LOG_MODULE_REGISTER(watchdog, LOG_LEVEL_INF);
 
+/* Give the hardware WDT fallback its full window before forcing a cold reboot.
+ * If the hardware fallback was never actually started, this is what recovers
+ * the device instead of freezing forever in the timeout callback. */
+#ifdef CONFIG_TASK_WDT_HW_FALLBACK
+#define WATCHDOG_SOFT_REBOOT_MS \
+	(CONFIG_TASK_WDT_MIN_TIMEOUT + CONFIG_TASK_WDT_HW_FALLBACK_DELAY + 500)
+#else
+#define WATCHDOG_SOFT_REBOOT_MS 500
+#endif
+
 #if DT_NODE_EXISTS(DT_ALIAS(watchdog0))
 #define WATCHDOG_NODE DT_ALIAS(watchdog0)
 #else
 #define WATCHDOG_NODE DT_NODELABEL(wdt)
 #endif
-
-/* Adafruit bootloader DFU magic number (DFU_MAGIC_UF2_RESET) */
-#define ADAFRUIT_DFU_MAGIC ADAFRUIT_DFU_MAGIC_UF2_RESET
 
 /* Channel handles from task_wdt_add() */
 static int channel_ids[WDT_CHANNEL_COUNT];
@@ -51,7 +58,8 @@ static const char *channel_names[] = {
 	"button",
 	"led",
 	"status",
-	"calibration"
+	"calibration",
+	"scan"
 };
 
 /* Store WDT reset status before RESETREAS is cleared by early_check */
@@ -66,7 +74,8 @@ static const uint32_t default_timeouts[] = {
 	10000,    // button - increased for boot delay
 	30000,   // led - can be suspended
 	15000,   // status - error display cycles
-	60000    // calibration - long operations
+	60000,   // calibration - long operations
+	10000    // scan - sensor bus discovery/init may need retries
 };
 
 /**
@@ -92,19 +101,25 @@ static void watchdog_timeout_callback(int channel_id, void *user_data)
 	LOG_ERR("System uptime: %u ms", k_uptime_get_32());
 
 	/* Important: When a callback is provided to task_wdt_add(), the task_wdt
-	 * does NOT automatically reboot. The hardware WDT fallback will only
-	 * trigger if we don't return from this callback. We spin here to let
-	 * the hardware WDT timeout and reset the system.
+	 * does NOT automatically reboot. The hardware WDT fallback normally
+	 * resets because this callback never returns. If the hardware fallback
+	 * was not actually started, that spin would freeze the device forever
+	 * with the watchdog appearing dead. Escape deterministically: let the
+	 * hardware WDT have its full fallback window, then force a cold reboot.
 	 */
-	LOG_ERR("Waiting for hardware WDT to reset system...");
+	LOG_ERR("Waiting up to %d ms for hardware WDT, then rebooting",
+		WATCHDOG_SOFT_REBOOT_MS);
 
-	/* Spin forever - hardware WDT will reset the system */
+	/* Busy-wait so the hardware WDT window runs out while interrupts stay
+	 * locked. k_cycle_get_32() is used because k_uptime stops advancing
+	 * while the system clock ISR is masked. */
 	uint32_t start_cycles = k_cycle_get_32();
 	uint32_t last_print_ms = 0;
 
-	while (1) {
-		/* Calculate elapsed time and print status every second */
-		uint32_t elapsed_ms = k_cyc_to_ms_floor32(k_cycle_get_32() - start_cycles);
+	while (k_cyc_to_ms_floor32(k_cycle_get_32() - start_cycles)
+	       < WATCHDOG_SOFT_REBOOT_MS) {
+		uint32_t elapsed_ms
+			= k_cyc_to_ms_floor32(k_cycle_get_32() - start_cycles);
 		if (elapsed_ms >= last_print_ms + 1000) {
 			printk("WDT: Still waiting... %u ms\n", elapsed_ms);
 			last_print_ms = elapsed_ms;
@@ -113,6 +128,9 @@ static void watchdog_timeout_callback(int channel_id, void *user_data)
 		/* Small delay to reduce CPU load */
 		k_busy_wait(1000);
 	}
+
+	LOG_ERR("Hardware WDT did not reset, forcing cold reboot");
+	sys_reboot(SYS_REBOOT_COLD);
 
 	/* Restore interrupts (unreachable, but for completeness) */
 	irq_unlock(key);
@@ -163,8 +181,7 @@ static void enter_dfu_mode(void)
 	}
 
 #if CONFIG_BUILD_OUTPUT_UF2 && !CONFIG_BOOTLOADER_MCUBOOT
-	/* Adafruit bootloader: Set GPREGRET to enter UF2 DFU mode */
-	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC;
+	NRF_POWER->GPREGRET = ADAFRUIT_DFU_MAGIC_UF2_RESET;
 	k_msleep(100);
 	sys_reboot(SYS_REBOOT_COLD);
 #elif CONFIG_BOARD_HAS_NRF5_BOOTLOADER && !CONFIG_BOOTLOADER_MCUBOOT

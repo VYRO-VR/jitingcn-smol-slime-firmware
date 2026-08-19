@@ -62,7 +62,7 @@ LOG_MODULE_DECLARE(sensor_scan, LOG_LEVEL_INF);
 	 || IS_ENABLED(CONFIG_SENSOR_DRV_LSM6DSV) || SLIME_IMU_KEEP_UNIMPL)
 
 #define SLIME_MAG_G0                                                                                                   \
-	(SLIME_MAG_KEEP_UNIMPL || IS_ENABLED(CONFIG_SENSOR_DRV_AK09940) || IS_ENABLED(CONFIG_SENSOR_DRV_IST8308)           \
+	(SLIME_MAG_KEEP_UNIMPL || IS_ENABLED(CONFIG_SENSOR_DRV_AK09940) || IS_ENABLED(CONFIG_SENSOR_DRV_IST8308)          \
 	 || IS_ENABLED(CONFIG_SENSOR_DRV_QMC6309))
 #define SLIME_MAG_G1                                                                                                   \
 	(SLIME_MAG_KEEP_UNIMPL || IS_ENABLED(CONFIG_SENSOR_DRV_AK09940) || IS_ENABLED(CONFIG_SENSOR_DRV_IST8308)          \
@@ -474,7 +474,7 @@ static const uint8_t i2c_dev_mag_id[] = {
 	0x48, // AK8963
 #endif
 #if IS_ENABLED(CONFIG_SENSOR_DRV_QMC6309)
-	0x90, // QMC6309H (H variant answers at 0x0C; non-H at 0x7C is group G10)
+	0x90, // QMC6309H (0x0C); QMC6309 uses the separate 0x7C group below
 #endif
 #endif // SLIME_MAG_G0
 #if SLIME_MAG_G1
@@ -619,7 +619,7 @@ static const int i2c_dev_mag[] = {
 	MAG_AK8963,
 #endif
 #if IS_ENABLED(CONFIG_SENSOR_DRV_QMC6309)
-	MAG_QMC6309, // QMC6309H at 0x0C
+	MAG_QMC6309,
 #endif
 #endif // SLIME_MAG_G0
 #if SLIME_MAG_G1
