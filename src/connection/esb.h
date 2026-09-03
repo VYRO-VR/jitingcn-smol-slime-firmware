@@ -136,6 +136,10 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 #define ESB_PONG_FLAG_SENS_AUTO 0x24        // Auto-calibrate gyro sensitivity
 #define ESB_PONG_FLAG_MAG_AUTO_ON 0x25      // Enable online magnetometer calibration
 #define ESB_PONG_FLAG_MAG_AUTO_OFF 0x26     // Disable online magnetometer calibration
+// Runtime magnetometer hold. Unlike MAG_ON/MAG_OFF this does not restart fusion,
+// does not touch flash, and is not persisted across a reboot.
+#define ESB_PONG_FLAG_MAG_HOLD 0x27   // Stop trusting the magnetometer
+#define ESB_PONG_FLAG_MAG_UNHOLD 0x28 // Resume normal magnetometer fusion
 #define ESB_PONG_FLAG_OTA_QUERY_INFO 0x30   // Request firmware info for ESB OTA
 #define ESB_PONG_FLAG_OTA_ABORT 0x31        // Abort ESB OTA update
 #define ESB_PONG_FLAG_OTA_SUPPRESS 0x32     // Suppress tracker during OTA (reduce poll rate)

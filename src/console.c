@@ -664,6 +664,7 @@ static void print_help(void)
 #endif
 	printk("  mag                        Show magnetometer status\n");
 	printk("  mag on|off                 Enable/disable magnetometer\n");
+	printk("  mag hold on|off            Stop/resume fusion trusting the magnetometer\n");
 	printk("  mag auto on|off     Enable/disable online magnetometer calibration\n");
 	printk("  mag clear                  Clear magnetometer calibration\n");
 	printk("  mag cal                    Start magnetometer calibration\n");
@@ -1364,6 +1365,7 @@ static void console_cmd_mag(size_t argc, char **argv)
 	if (arg == NULL) {
 		// No argument: show status
 		printk("Magnetometer: %s\n", sensor_get_mag_enabled() ? "enabled" : "disabled");
+		printk("Hold: %s\n", sensor_get_mag_hold() ? "engaged (fusion ignoring mag)" : "released");
 		printk("Hardware: %s\n", sensor_get_sensor_mag_name());
 		printk("Magnetometer matrix:\n");
 		for (int i = 0; i < 3; i++) {
@@ -1391,7 +1393,15 @@ static void console_cmd_mag(size_t argc, char **argv)
 	} else {
 		char *subcmd = arg;
 		if (subcmd == NULL) {
-			printk("Usage: mag [on|off|clear|cal|auto <on|off>]\n");
+			printk("Usage: mag [on|off|hold <on|off>|clear|cal|auto <on|off>]\n");
+		} else if (strcmp(subcmd, "hold") == 0) {
+			if (arg2 == NULL || (strcmp(arg2, "on") != 0 && strcmp(arg2, "off") != 0)) {
+				printk("Usage: mag hold <on|off>\n");
+			} else {
+				bool hold = strcmp(arg2, "on") == 0;
+				sensor_set_mag_hold(hold);
+				printk("Magnetometer hold %s\n", hold ? "engaged" : "released");
+			}
 		} else if (strcmp(subcmd, "on") == 0) {
 			printk("Enabling magnetometer\n");
 			sensor_set_mag_enabled(true);

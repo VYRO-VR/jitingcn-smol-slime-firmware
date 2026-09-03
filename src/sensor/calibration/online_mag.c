@@ -154,6 +154,9 @@ static atomic_t online_collection_suppress_until; /* uint32 ms, 0 = not suppress
 #define ONLINE_VQF_DIST_MIN_DURATION_MS 3000
 static atomic_t online_mag_dist_start_time; /* uint32 ms, 0 = no disturbance */
 static atomic_t online_commits_suspended;
+/* Runtime hold requested by the host (ESB_PONG_FLAG_MAG_HOLD). Kept separate from
+ * online_commits_suspended, which is a one-way power-down latch with no resume. */
+static atomic_t online_mag_hold;
 static atomic_t online_enabled;
 
 // Require at least N successful calibration updates before trusting the
@@ -382,6 +385,16 @@ void magneto_online_replace_BAinv_and_reset(const float replacement[4][3])
 	memset(&online_runtime_state, 0, sizeof(online_runtime_state));
 	k_spin_unlock(&online_runtime_state_lock, state_key);
 	k_spin_unlock(&online_publish_lock, publish_key);
+}
+
+void sensor_calibration_set_online_mag_hold(bool hold)
+{
+	atomic_set(&online_mag_hold, hold ? 1 : 0);
+}
+
+bool sensor_calibration_get_online_mag_hold(void)
+{
+	return atomic_get(&online_mag_hold) != 0;
 }
 
 void sensor_calibration_online_mag_prepare_power_down(void)
@@ -710,6 +723,14 @@ void sensor_calibration_online_mag_sample(const float m[3])
 		return;
 	}
 
+	/* While the mag is held the field is not trusted at all, so no sample may
+	 * enter the buffer. Returning before the disturbance timer below also keeps
+	 * the hold from arming the sustained-disturbance override that would
+	 * otherwise open the sample gate after 5 s. */
+	if (sensor_calibration_get_online_mag_hold()) {
+		return;
+	}
+
 	/* This thread owns quad_buf, so it performs any clear requested elsewhere. */
 	magneto_online_service_clear();
 
@@ -867,6 +888,7 @@ static bool magneto_online_commit_BAinv(const float m_inv[4][3], unsigned snap_g
 	sys_warm_transaction_begin();
 	k_spinlock_key_t key = k_spin_lock(&online_publish_lock);
 	if (atomic_get(&online_commits_suspended) != 0
+	    || atomic_get(&online_mag_hold) != 0
 	    || atomic_get(&online_enabled) == 0
 	    || (unsigned)atomic_get(&quad_buf_gen) != snap_gen) {
 		k_spin_unlock(&online_publish_lock, key);
@@ -890,7 +912,8 @@ static bool magneto_online_commit_BAinv(const float m_inv[4][3], unsigned snap_g
 bool sensor_calibration_online_mag_check(void)
 {
 	if (!sensor_calibration_get_online_mag_enabled()
-	    || atomic_get(&online_commits_suspended) != 0) {
+	    || atomic_get(&online_commits_suspended) != 0
+	    || atomic_get(&online_mag_hold) != 0) {
 		return false;
 	}
 	float existing_cal[4][3];

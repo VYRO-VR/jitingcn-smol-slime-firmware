@@ -458,9 +458,54 @@ void vqf_update_accel(float *a, float time)
 	vqf_track_rest_diag();
 }
 
+/* Runtime magnetometer hold (ESB_PONG_FLAG_MAG_HOLD). Suppressing the mag update
+ * has to happen before the library call: updateMag applies the heading step
+ * (delta += k * lastMagDisAngle) and runs the new-field acceptance branch
+ * internally, so clearing state afterwards would be too late. */
+static bool mag_hold;
+
+/* Stop the filter trusting the current field for the samples that follow.
+ * magCandidateT is zeroed as well so a held tracker cannot silently accumulate
+ * its way to adopting a disturbed field as the new reference. */
+static void vqf_suppress_mag(void)
+{
+	state.magDistDetected = true;
+	state.magUndisturbedT = 0.0f;
+	state.magCandidateT = 0.0f;
+}
+
+void vqf_set_mag_hold(bool hold)
+{
+	if (hold == mag_hold) {
+		return;
+	}
+	mag_hold = hold;
+	if (hold) {
+		vqf_suppress_mag();
+	} else {
+		/* Re-seed the candidate tracker from the current field so releasing the
+		 * hold does not immediately credit time accumulated before it. */
+		state.magCandidateNorm = state.magNormDip[0];
+		state.magCandidateDip = state.magNormDip[1];
+		state.magCandidateT = 0.0f;
+	}
+}
+
+bool vqf_get_mag_hold(void)
+{
+	return mag_hold;
+}
+
 void vqf_update_mag(float *m, float time)
 {
 	if (!vqf_vec3_finite(m)) {
+		return;
+	}
+	/* Skipping the update entirely leaves state.lastMagTsUs where it was, and the
+	 * synthetic timestamp below is rebuilt from it on every call, so the first
+	 * sample after the hold is released still derives the correct dt. */
+	if (mag_hold) {
+		vqf_suppress_mag();
 		return;
 	}
 	// Use the caller-supplied time step when valid so that VQF time accumulators
@@ -970,6 +1015,8 @@ const sensor_fusion_t sensor_fusion_vqf = {
 	.get_rest_detected = vqf_get_rest_detected,
 	.get_relative_rest_deviations = vqf_get_relative_rest_deviations,
 	.get_mag_dist_detected = vqf_get_mag_dist_detected,
+	.set_mag_hold = vqf_set_mag_hold,
+	.get_mag_hold = vqf_get_mag_hold,
 	.reset_mag_ref = vqf_reset_mag_ref,
 	.set_mag_ref = vqf_set_mag_ref,
 	.get_mag_ref = vqf_get_mag_ref,

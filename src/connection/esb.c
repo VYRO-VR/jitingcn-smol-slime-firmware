@@ -250,6 +250,18 @@ static void esb_remote_cmd_mag_auto_off(void)
 	sensor_calibration_set_online_mag_enabled(false);
 }
 
+static void esb_remote_cmd_mag_hold(void)
+{
+	LOG_INF("Executing remote command: MAG_HOLD");
+	sensor_set_mag_hold(true);
+}
+
+static void esb_remote_cmd_mag_unhold(void)
+{
+	LOG_INF("Executing remote command: MAG_UNHOLD");
+	sensor_set_mag_hold(false);
+}
+
 static void esb_remote_cmd_tcal_on(void)
 {
 #if CONFIG_SENSOR_USE_TCAL
@@ -580,6 +592,8 @@ static const struct esb_remote_cmd esb_remote_cmds[] = {
 	{ESB_PONG_FLAG_OTA_ABORT, "OTA_ABORT", esb_remote_cmd_ota_abort},
 	{ESB_PONG_FLAG_OTA_SUPPRESS, "OTA_SUPPRESS", esb_remote_cmd_ota_suppress},
 	{ESB_PONG_FLAG_OTA_UNSUPPRESS, "OTA_UNSUPPRESS", esb_remote_cmd_ota_unsuppress},
+	{ESB_PONG_FLAG_MAG_HOLD, "MAG_HOLD", esb_remote_cmd_mag_hold},
+	{ESB_PONG_FLAG_MAG_UNHOLD, "MAG_UNHOLD", esb_remote_cmd_mag_unhold},
 };
 
 static const char *esb_remote_cmd_name(uint8_t flag)
