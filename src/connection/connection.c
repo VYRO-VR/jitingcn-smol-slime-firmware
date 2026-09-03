@@ -248,7 +248,7 @@ uint8_t connection_get_packet_sequence(void)
 #define SUB_DATA_LEN_STATUS 2   /* type 3: svr_stat + status */
 #define SUB_DATA_LEN_MAG 14     /* type 4: q0-q3 + m0-m2 */
 #define SUB_DATA_LEN_RUNTIME 8  /* type 5: remaining runtime estimate */
-#define SUB_DATA_LEN_SENS_CAL 7 /* type 6: gyro sensitivity calibration progress/result */
+#define SUB_DATA_LEN_SENS_CAL 7 /* ESB_SENS_CAL_REPORT_TYPE: gyro sensitivity calibration progress/result */
 
 /* Fill sub-packet payload (without type/id prefix) into buf, return bytes written */
 static int fill_sub_info(uint8_t *buf)
@@ -374,7 +374,6 @@ static const struct sub_packet_desc sub_packet_table[] = {
 	[3] = {SUB_DATA_LEN_STATUS, true, fill_sub_status},
 	[4] = {SUB_DATA_LEN_MAG, false, fill_sub_mag},
 	[5] = {SUB_DATA_LEN_RUNTIME, true, fill_sub_runtime},
-	[6] = {SUB_DATA_LEN_SENS_CAL, true, fill_sub_sens_cal},
 };
 
 static const struct sub_packet_desc *sub_packet_get(uint8_t type)
@@ -638,11 +637,21 @@ bool connection_write_packet_5() // runtime estimate
 	return write_normal_packet(data);
 }
 
-bool connection_write_packet_6() // gyro sensitivity calibration progress/result
+/* Gyro sensitivity calibration progress/result.
+ *
+ * Built by hand rather than through sub_packet_table: the report is a
+ * standalone stream type (ESB_SENS_CAL_REPORT_TYPE), deliberately outside
+ * the 0-7 range SlimeVR Server parses, and must never be offered as a
+ * composite sub-packet. Keeping it out of the table makes both true by
+ * construction. */
+bool connection_write_packet_sens_cal()
 {
 	uint8_t data[16];
 
-	fill_normal_packet(6, data);
+	memset(data, 0, sizeof(data));
+	data[0] = ESB_SENS_CAL_REPORT_TYPE;
+	data[1] = tracker_id;
+	fill_sub_sens_cal(&data[2]);
 	return write_normal_packet(data);
 }
 
@@ -1811,11 +1820,11 @@ void connection_thread(void)
 		 * never run. Preempt one quat frame instead; at 2 Hz for the duration of
 		 * a run that is a negligible share of the fusion stream.
 		 *
-		 * Type 6 is deliberately never added to a composite frame: a receiver
-		 * that does not know the type cannot skip it, and would mis-offset every
-		 * following sub-packet. A standalone frame is self-delimiting, so an
-		 * un-updated receiver simply drops it. */
-		if (sens_cal_due && connection_write_packet_6()) {
+		 * The report is deliberately never added to a composite frame: a
+		 * receiver that does not know the type cannot skip it, and would
+		 * mis-offset every following sub-packet. A standalone frame is
+		 * self-delimiting, so an un-updated receiver simply drops it. */
+		if (sens_cal_due && connection_write_packet_sens_cal()) {
 			last_sens_cal_time = now;
 			continue;
 		}

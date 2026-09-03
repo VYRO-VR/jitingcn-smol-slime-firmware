@@ -33,6 +33,7 @@ void eqf_get_quat(float *q);
 bool eqf_get_rest_detected(void);
 void eqf_get_relative_rest_deviations(float out[2]);
 bool eqf_get_mag_dist_detected(void);
+bool eqf_get_rest_heading_disturbed(void);
 void eqf_set_mag_hold(bool hold);
 bool eqf_get_mag_hold(void);
 void eqf_reset_mag_ref(void);

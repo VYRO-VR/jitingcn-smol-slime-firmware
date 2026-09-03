@@ -51,7 +51,7 @@ bool connection_write_packet_2();
 bool connection_write_packet_3();
 bool connection_write_packet_4();
 bool connection_write_packet_5();
-bool connection_write_packet_6();
+bool connection_write_packet_sens_cal();
 
 // Raw sensor data collection (runtime controlled via PONG command)
 

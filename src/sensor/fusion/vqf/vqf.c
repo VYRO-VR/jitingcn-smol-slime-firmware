@@ -491,6 +491,14 @@ static int64_t rest_heading_since;
 static int64_t rest_heading_trip_since;
 static bool rest_heading_disturbed;
 
+static void vqf_rest_heading_reset(void)
+{
+	rest_heading_valid = false;
+	rest_heading_disturbed = false;
+	rest_heading_since = 0;
+	rest_heading_trip_since = 0;
+}
+
 #define VQF_PI_F 3.14159265358979323846f
 
 static float vqf_wrap_pi(float angle)
@@ -528,10 +536,7 @@ static bool vqf_rest_heading_disturbed(void)
 
 	if (!state.restDetected) {
 		/* Motion invalidates the reference: the heading is supposed to move. */
-		rest_heading_valid = false;
-		rest_heading_disturbed = false;
-		rest_heading_since = 0;
-		rest_heading_trip_since = 0;
+		vqf_rest_heading_reset();
 		return false;
 	}
 
@@ -596,6 +601,12 @@ void vqf_set_mag_hold(bool hold)
 		state.magCandidateNorm = state.magNormDip[0];
 		state.magCandidateDip = state.magNormDip[1];
 		state.magCandidateT = 0.0f;
+		/* An explicit release is the host saying the field is trustworthy
+		 * again. Re-baseline the rest-gated heading check rather than comparing
+		 * against a reference latched before the hold: otherwise a field that
+		 * moved during the hold would keep the mag suppressed until the tracker
+		 * moves, and the hold would not be revertible from the host. */
+		vqf_rest_heading_reset();
 	}
 }
 

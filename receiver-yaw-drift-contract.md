@@ -46,6 +46,13 @@ Side effect worth knowing about at the host: while held, the tracker reports mag
 disturbance continuously, so the existing temperature-byte sign-flip
 (`connection_update_sensor_temp`) shows "disturbed" for the duration of the hold.
 
+Releasing the hold also re-baselines the rest-gated heading check (Phase 2,
+Task F2, in both VQF and EqF): an explicit `MAG_UNHOLD` is the host saying the
+field is trustworthy again, so the check latches a fresh reference at the next
+rest instead of comparing against one from before the hold. Without that, a
+field that moved during the hold would keep the mag suppressed until the
+tracker next moved, and the hold would not be revertible from the host.
+
 ---
 
 ## 2. New uplink sub-packet type 6 (tracker → host)

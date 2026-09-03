@@ -150,6 +150,15 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 // Raw data collection packet types
 // DEPRECATED on tracker: ESB_RAW_IMU/MAG unused; live TX is ESB_RAW_IMU_QUAT_TYPE.
 // Kept for wire-format docs / receiver + analyzer compatibility.
+// Gyro sensitivity calibration report (tracker -> host), standalone only.
+//
+// Deliberately outside the 0-7 stream types SlimeVR Server parses: the server
+// reads type 6 as "button + sleep time" and would turn a calibration run into
+// a burst of button taps (resets), and anything it reads as a quaternion would
+// glitch orientation at 2 Hz. It ignores unknown types, and the receiver
+// forwards any stream type <= 223 unchanged.
+#define ESB_SENS_CAL_REPORT_TYPE 0x40
+
 #define ESB_RAW_IMU_TYPE    0x10  // DEPRECATED: legacy raw IMU (float)
 #define ESB_RAW_MAG_TYPE    0x11  // DEPRECATED: reserved raw mag
 #define ESB_RAW_META_TYPE   0x12  // Metadata (ODR, range, sensor IDs - sent once)
