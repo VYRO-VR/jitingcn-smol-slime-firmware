@@ -165,7 +165,7 @@ jobs:
           # too (plus the nrf/mcuboot requirement sets installed below).
           key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements*.txt', 'zephyr-workspace/nrf/scripts/requirements-build.txt', 'zephyr-workspace/bootloader/mcuboot/scripts/requirements.txt') }}
 
-      - name: 🐍 Install Zephyr Python Requirements
+      - name: 🐍 Install NCS, Zephyr, and MCUboot Python Requirements
         id: install-pip
         if: steps.cache-pip.outputs.cache-hit != 'true'
         run: |
@@ -199,7 +199,6 @@ jobs:
 
   build:
     needs: setup
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -223,7 +222,8 @@ jobs:
                   {boardname: "aero_pro_uf2/nrf52840", filename: "Aero_Tracker_Pro"},
                   {boardname: "kawazu_uf2/nrf52833", filename: "Kawazu_Tracker"},
                   {boardname: "nini_slimevr_mag_uf2/nrf52833", filename: "NiNi_SlimeVR_MAG_Tracker"},
-                  {boardname: "nekonya_tracker_uf2/nrf52833", filename: "nekonya_tracker_uf2"}
+                  {boardname: "nekonya_tracker_uf2/nrf52833", filename: "nekonya_tracker_uf2"},
+                  {boardname: "estmini_uf2/nrf52840", filename: "Estmini_Tracker"}
                 ]
     runs-on: ubuntu-latest
     steps:
