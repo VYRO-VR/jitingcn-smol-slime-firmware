@@ -11,6 +11,7 @@ void cmd_sens_set(float x, float y, float z);
 void cmd_sens_auto(const char *axis_str, const char *rev_str);
 void cmd_sens_auto_request(uint8_t axis, uint16_t revolutions);
 void cmd_sens_reset(void);
+void cmd_sens_status(void);
 void cmd_reset_zro(void);
 void cmd_reset_acc(void);
 void cmd_reset_bat(void);

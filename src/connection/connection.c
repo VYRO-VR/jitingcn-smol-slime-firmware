@@ -24,6 +24,7 @@
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
 #include "sensor/calibration/online_mag.h"
+#include "sensor/calibration/cal_sens.h"
 #include "connection.h"
 #include "util.h"
 #include "esb.h"
@@ -247,6 +248,7 @@ uint8_t connection_get_packet_sequence(void)
 #define SUB_DATA_LEN_STATUS 2   /* type 3: svr_stat + status */
 #define SUB_DATA_LEN_MAG 14     /* type 4: q0-q3 + m0-m2 */
 #define SUB_DATA_LEN_RUNTIME 8  /* type 5: remaining runtime estimate */
+#define SUB_DATA_LEN_SENS_CAL 7 /* type 6: gyro sensitivity calibration progress/result */
 
 /* Fill sub-packet payload (without type/id prefix) into buf, return bytes written */
 static int fill_sub_info(uint8_t *buf)
@@ -334,6 +336,20 @@ static int fill_sub_runtime(uint8_t *buf)
 	return SUB_DATA_LEN_RUNTIME;
 }
 
+static int fill_sub_sens_cal(uint8_t *buf)
+{
+	struct sens_cal_report report;
+	sens_cal_get_report(&report);
+	buf[0] = report.phase;
+	buf[1] = report.result;
+	buf[2] = report.axis;
+	buf[3] = report.seq;
+	uint16_t *b = (uint16_t *)&buf[4];
+	b[0] = report.scale_q12;
+	b[1] = report.progress;
+	return SUB_DATA_LEN_SENS_CAL;
+}
+
 struct composite_builder {
 	uint8_t types[5];
 	int64_t *last_times[5];
@@ -358,6 +374,7 @@ static const struct sub_packet_desc sub_packet_table[] = {
 	[3] = {SUB_DATA_LEN_STATUS, true, fill_sub_status},
 	[4] = {SUB_DATA_LEN_MAG, false, fill_sub_mag},
 	[5] = {SUB_DATA_LEN_RUNTIME, true, fill_sub_runtime},
+	[6] = {SUB_DATA_LEN_SENS_CAL, true, fill_sub_sens_cal},
 };
 
 static const struct sub_packet_desc *sub_packet_get(uint8_t type)
@@ -570,6 +587,7 @@ void connection_update_status(int status)
 //|rssi    | |3      |id      |svr_stat|status  |resv |rssi    |
 //| |4      |id      |q0               |q1               |q2               |q3               |m0 |m1 |m2 |
 //| |5      |id      |runtime (uint64, us)                              |resv              |rssi |
+//| |6      |id      |phase   |result  |axis    |seq     |scale_q12        |progress         |resv |
 
 bool connection_write_packet_0() // device info
 {
@@ -620,9 +638,45 @@ bool connection_write_packet_5() // runtime estimate
 	return write_normal_packet(data);
 }
 
+bool connection_write_packet_6() // gyro sensitivity calibration progress/result
+{
+	uint8_t data[16];
+
+	fill_normal_packet(6, data);
+	return write_normal_packet(data);
+}
+
 static int64_t last_info_time = 0;
 static int64_t last_status_time = 0;
 static int64_t last_runtime_time = 0;
+static int64_t last_sens_cal_time = 0;
+static int64_t sens_cal_done_since = 0;
+
+/* Sensitivity calibration reports are sent only while a run is in progress, plus
+ * a short linger afterwards so a host that was not listening at the moment of
+ * completion still sees the outcome. The report itself never returns to IDLE. */
+#define SENS_CAL_REPORT_LINGER_MS 10000
+
+static bool sens_cal_report_wanted(int64_t now)
+{
+	static uint8_t last_phase;
+	static uint8_t last_seq;
+	struct sens_cal_report report;
+
+	sens_cal_get_report(&report);
+	if (report.phase == SENS_CAL_PHASE_IDLE) {
+		return false;
+	}
+	if (report.phase != last_phase || report.seq != last_seq) {
+		last_phase = report.phase;
+		last_seq = report.seq;
+		sens_cal_done_since = report.phase == SENS_CAL_PHASE_DONE ? now : 0;
+	}
+	if (report.phase != SENS_CAL_PHASE_DONE) {
+		return true;
+	}
+	return sens_cal_done_since != 0 && now - sens_cal_done_since < SENS_CAL_REPORT_LINGER_MS;
+}
 
 /*
  * Raw sensor data collection subsystem.
@@ -1739,6 +1793,7 @@ void connection_thread(void)
 		bool info_due = !in_test_mode && sensor_ids_set && (now - last_info_time > 100);
 		bool status_due = !in_test_mode && (now - last_status_time > 1000);
 		bool runtime_due = !in_test_mode && (now - last_runtime_time > 1000);
+		bool sens_cal_due = !in_test_mode && sens_cal_report_wanted(now) && (now - last_sens_cal_time > 500);
 
 		/* Low-frequency fields may always piggyback on a quat/test packet. */
 		bool info_soon = sensor_ids_set && (now - last_info_time > 100 - COMPOSITE_LOOKAHEAD_MS);
@@ -1750,6 +1805,20 @@ void connection_thread(void)
 		bool runtime_wanted = runtime_due || runtime_soon;
 		bool info_wanted = info_due || info_soon;
 		bool mag_wanted = mag_due || mag_soon;
+
+		/* A sensitivity calibration means the user is spinning the tracker, so
+		 * quat_ready is true on nearly every pass and the standalone sends below
+		 * never run. Preempt one quat frame instead; at 2 Hz for the duration of
+		 * a run that is a negligible share of the fusion stream.
+		 *
+		 * Type 6 is deliberately never added to a composite frame: a receiver
+		 * that does not know the type cannot skip it, and would mis-offset every
+		 * following sub-packet. A standalone frame is self-delimiting, so an
+		 * un-updated receiver simply drops it. */
+		if (sens_cal_due && connection_write_packet_6()) {
+			last_sens_cal_time = now;
+			continue;
+		}
 
 		if (quat_ready) {
 			struct composite_builder builder;
