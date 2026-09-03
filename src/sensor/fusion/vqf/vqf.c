@@ -458,6 +458,52 @@ void vqf_update_accel(float *a, float time)
 	vqf_track_rest_diag();
 }
 
+/* ---------- Rest-gated heading disturbance check ----------
+ *
+ * VQF's own disturbance detection only compares the field NORM and DIP against a
+ * reference. A distortion that rotates the horizontal field without changing
+ * either — steel chair legs, a bed frame, a desk leg — passes it undetected, and
+ * once the tracker has moved enough near that field VQF adopts it as the new
+ * reference (magNewTime, currently 3 s of motion above magNewMinGyr).
+ *
+ * A stationary tracker's mag-implied heading, however, has no business moving.
+ * Rest detection and mag disturbance detection are both computed every sample and
+ * are never cross-referenced; doing so catches the direction-only case, at least
+ * while the tracker is still.
+ *
+ * The reference is the ABSOLUTE mag heading (lastMagDisAngle + delta), not
+ * lastMagDisAngle alone: delta chases the mag correction, so the disagreement
+ * decays toward zero on its own and would mask a slow field rotation.
+ *
+ * Thresholds: lastMagDisAngle is not low-pass filtered (magCurrentTau applies only
+ * to magNormDip), so an instantaneous 2 deg test would trip on magnetometer
+ * heading noise. 3 deg sustained for half a second keeps the false-positive rate
+ * low while still reacting within about a second, which is fast relative to the
+ * 3 s adoption window it exists to block.
+ */
+#define VQF_REST_HEADING_SETTLE_MS 1000  /* Continuous rest before latching, lets magCurrentTau settle */
+#define VQF_REST_HEADING_TH_RAD (3.0f * DEG_TO_RAD)
+#define VQF_REST_HEADING_DEBOUNCE_MS 500
+
+static bool rest_heading_valid;
+static float rest_heading_ref;
+static int64_t rest_heading_since;
+static int64_t rest_heading_trip_since;
+static bool rest_heading_disturbed;
+
+#define VQF_PI_F 3.14159265358979323846f
+
+static float vqf_wrap_pi(float angle)
+{
+	while (angle > VQF_PI_F) {
+		angle -= 2.0f * VQF_PI_F;
+	}
+	while (angle < -VQF_PI_F) {
+		angle += 2.0f * VQF_PI_F;
+	}
+	return angle;
+}
+
 /* Runtime magnetometer hold (ESB_PONG_FLAG_MAG_HOLD). Suppressing the mag update
  * has to happen before the library call: updateMag applies the heading step
  * (delta += k * lastMagDisAngle) and runs the new-field acceptance branch
@@ -472,6 +518,68 @@ static void vqf_suppress_mag(void)
 	state.magDistDetected = true;
 	state.magUndisturbedT = 0.0f;
 	state.magCandidateT = 0.0f;
+}
+
+/* Evaluated before the library update, using the previous sample's values, so the
+ * suppression applies to the sample about to be processed rather than one late. */
+static bool vqf_rest_heading_disturbed(void)
+{
+	int64_t now = k_uptime_get();
+
+	if (!state.restDetected) {
+		/* Motion invalidates the reference: the heading is supposed to move. */
+		rest_heading_valid = false;
+		rest_heading_disturbed = false;
+		rest_heading_since = 0;
+		rest_heading_trip_since = 0;
+		return false;
+	}
+
+	if (rest_heading_disturbed) {
+		/* Latched until rest is left. Un-tripping on the angle wandering back
+		 * would let a slowly rotating field through a sample at a time. */
+		return true;
+	}
+
+	if (!rest_heading_valid) {
+		if (rest_heading_since == 0) {
+			rest_heading_since = now;
+			return false;
+		}
+		if (now - rest_heading_since < VQF_REST_HEADING_SETTLE_MS) {
+			return false;
+		}
+		if (state.magDistDetected) {
+			/* Already flagged by the norm/dip path; there is nothing to add,
+			 * and latching a known-bad heading as the reference would only
+			 * hide a later change. Retry once the field looks clean again. */
+			return false;
+		}
+		rest_heading_ref = vqf_wrap_pi(state.lastMagDisAngle + state.delta);
+		rest_heading_valid = true;
+		rest_heading_trip_since = 0;
+		return false;
+	}
+
+	float diff = vqf_wrap_pi(vqf_wrap_pi(state.lastMagDisAngle + state.delta) - rest_heading_ref);
+	if (fabsf(diff) < VQF_REST_HEADING_TH_RAD) {
+		rest_heading_trip_since = 0;
+		return false;
+	}
+	if (rest_heading_trip_since == 0) {
+		rest_heading_trip_since = now;
+		return false;
+	}
+	if (now - rest_heading_trip_since < VQF_REST_HEADING_DEBOUNCE_MS) {
+		return false;
+	}
+	rest_heading_disturbed = true;
+	return true;
+}
+
+bool vqf_get_rest_heading_disturbed(void)
+{
+	return rest_heading_disturbed;
 }
 
 void vqf_set_mag_hold(bool hold)
@@ -505,6 +613,10 @@ void vqf_update_mag(float *m, float time)
 	 * synthetic timestamp below is rebuilt from it on every call, so the first
 	 * sample after the hold is released still derives the correct dt. */
 	if (mag_hold) {
+		vqf_suppress_mag();
+		return;
+	}
+	if (vqf_rest_heading_disturbed()) {
 		vqf_suppress_mag();
 		return;
 	}
@@ -650,6 +762,7 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 
 	// Magnetic disturbance / reference
 	info->mag_dist_detected = getMagDistDetected(&state);
+	info->rest_heading_disturbed = rest_heading_disturbed;
 	info->mag_ref_norm = getMagRefNorm(&state);
 	info->mag_ref_dip = getMagRefDip(&state);
 
