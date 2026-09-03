@@ -9,7 +9,11 @@
 #include "sensor/fusion/vqf/vqf.h"
 #endif
 #include "connection/esb.h"
+#include "connection/connection.h"
 #include "connection/tdma.h"
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+#include "connection/radio_capture.h"
+#endif
 #include "build_defines.h"
 #include "parse_args.h"
 #include "zephyr/sys/printk.h"
@@ -317,10 +321,16 @@ static void print_sensor_detail(void)
 	);
 #endif
 	if (loop_ms > 0.0f) {
-		printk("  Loop:        ~%.1f ms\n", (double)loop_ms);
+		printk("  Work time:   ~%.1f ms/loop\n", (double)loop_ms);
 	} else {
-		printk("  Loop:        n/a\n");
+		printk("  Work time:   n/a\n");
 	}
+	printk(
+		"  Test mode:   %s (target=%u, effective=%u TPS)\n",
+		test_mode_get() ? "enabled" : "disabled",
+		test_mode_get_target_tps(),
+		test_mode_effective_tps()
+	);
 
 #if CONFIG_SENSOR_USE_6_SIDE_CALIBRATION
 	printk("\nAccelerometer matrix:\n");
@@ -1508,8 +1518,10 @@ static void console_cmd_dfu(size_t argc, char **argv)
 
 static void console_cmd_ping(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	if (argc > 1 && strcmp(argv[1], "stats") == 0) {
+		connection_print_ping_stats();
+		return;
+	}
 	cmd_ping_start();
 }
 
@@ -1626,6 +1638,28 @@ static void console_cmd_tdma(size_t argc, char **argv)
 	} else if (arg && strcmp(arg, "off") == 0) {
 		tdma_set_enabled(false);
 		printk("TDMA disabled\n");
+	} else if (arg && strcmp(arg, "capture") == 0) {
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		char *state = argc > 2 ? argv[2] : NULL;
+		if (state && strcmp(state, "on") == 0) {
+			radio_capture_set_enabled(true);
+			printk("RADIO capture enabled\n");
+		} else if (state && strcmp(state, "off") == 0) {
+			radio_capture_set_enabled(false);
+			printk("RADIO capture disabled\n");
+		} else {
+			printk("RADIO capture: %s\n", radio_capture_is_enabled() ? "enabled" : "disabled");
+			radio_capture_print_stats();
+		}
+#else
+		printk("tdma capture requires CONFIG_TDMA_DIAGNOSTICS=y\n");
+#endif
+	} else if (arg && strcmp(arg, "stats") == 0) {
+#if defined(CONFIG_TDMA_DIAGNOSTICS)
+		tdma_print_stats();
+#else
+		printk("tdma stats requires CONFIG_TDMA_DIAGNOSTICS=y\n");
+#endif
 	} else {
 		printk("TDMA: %s\n", tdma_is_enabled() ? "enabled" : "disabled");
 	}
@@ -1691,12 +1725,9 @@ static const struct console_cmd console_cmds[] = {
 
 static void console_thread(void)
 {
-#if USB_EXISTS && DFU_EXISTS
-	if (button_read()) // button held on usb connect, enter DFU
-	{
-		sys_enter_dfu(false);
-	}
-#endif
+	// USB serial readiness is handled by usb.c usb_ctrl_thread via DTR;
+	// this thread starts only once the terminal has asserted DTR.
+	// DFU-on-button also lives in usb_ctrl_thread (needs button_read_filtered).
 
 #if USB_EXISTS || UART_CONSOLE_EXISTS
 	console_getline_init();
@@ -1706,25 +1737,7 @@ static void console_thread(void)
 		k_usleep(1);
 	}
 
-#if USB_EXISTS
-	// Wait for USB CDC to be ready by checking DTR (Data Terminal Ready) signal
-	// This ensures the terminal is actually connected and ready to receive data
-	const struct device *uart_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
-	if (device_is_ready(uart_dev)) {
-		uint32_t dtr = 0;
-		// Wait up to 5 seconds for DTR to be asserted (terminal connected)
-		for (int i = 0; i < 50; i++) {
-			if (uart_line_ctrl_get(uart_dev, UART_LINE_CTRL_DTR, &dtr) == 0 && dtr) {
-				break;
-			}
-			k_msleep(100);
-		}
-		// Give a bit more time for the terminal to be fully ready
-		k_msleep(100);
-	}
-
 	printk("*** " CONFIG_SLIMEVR_USB_DEVICE_MANUFACTURER " " CONFIG_SLIMEVR_USB_DEVICE_PRODUCT " ***\n");
-#endif
 #endif
 	printk(FW_STRING);
 	printk("Repo: %s | Branch: %s\n", FW_GIT_REPO_URL, FW_GIT_BRANCH);
