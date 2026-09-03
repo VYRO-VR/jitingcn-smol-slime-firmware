@@ -5,11 +5,14 @@ LDLIBS += -lm -fsanitize=undefined
 
 .PHONY: check clean
 
-check: test_eqf_mag_hold
-	./test_eqf_mag_hold
+TESTS := test_eqf_mag_hold test_eqf_rest_heading
 
-test_eqf_mag_hold: test_eqf_mag_hold.c ../../../src/sensor/fusion/eqf/eqf.c
-	$(CC) $(CFLAGS) -o $@ test_eqf_mag_hold.c ../../../src/sensor/fusion/eqf/eqf.c $(LDLIBS)
+check: $(TESTS)
+	./test_eqf_mag_hold
+	./test_eqf_rest_heading
+
+$(TESTS): %: %.c ../../../src/sensor/fusion/eqf/eqf.c
+	$(CC) $(CFLAGS) -o $@ $< ../../../src/sensor/fusion/eqf/eqf.c $(LDLIBS)
 
 clean:
-	$(RM) test_eqf_mag_hold
+	$(RM) $(TESTS)

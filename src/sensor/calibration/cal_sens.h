@@ -34,7 +34,7 @@
  * outcome from phase timeouts.
  *
  * These enum values are part of the receiver/host wire contract (uplink
- * sub-packet type 6). Never renumber them, only append.
+ * stream type ESB_SENS_CAL_REPORT_TYPE). Never renumber them, only append.
  */
 enum sens_cal_phase {
 	SENS_CAL_PHASE_IDLE = 0,

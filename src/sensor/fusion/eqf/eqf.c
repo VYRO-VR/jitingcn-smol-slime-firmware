@@ -130,6 +130,53 @@ static float mag_undisturbed_t;    /* stable time in current field       */
 static float mag_reject_t;         /* accumulated rejection time         */
 static bool  mag_hold;             /* runtime host-requested mag hold    */
 
+/* ── Rest-gated heading disturbance check (volatile, not saved) ─────
+ *
+ * EqF's own disturbance detection compares only the field NORM against its
+ * reference. A distortion that rotates the field without changing its
+ * magnitude — steel chair legs, a bed frame, a desk leg — passes it
+ * undetected, and after EQF_MAG_NEW_TIME of motion near that field EqF adopts
+ * it as the new reference.
+ *
+ * A stationary tracker's field direction, however, has no business moving.
+ * Rest detection and disturbance detection are computed every sample and were
+ * never cross-referenced; doing so catches the direction-only case, at least
+ * while the tracker is still.
+ *
+ * VQF keeps a mag-implied heading disagreement (lastMagDisAngle); EqF has no
+ * such intermediate, so the invariant used here is the BODY-frame field
+ * direction, which at rest can only change if the field itself does. The full
+ * 3-D angle is compared rather than the horizontal component alone: that is a
+ * superset (it also covers dip, which EqF does not otherwise check) and needs
+ * no tilt bookkeeping.
+ *
+ * Thresholds: the REFERENCE is the direction low-passed with
+ * EQF_MAG_CURRENT_TAU, latched only after a settle period of continuous rest
+ * and only when the norm path is clean. The CURRENT direction is compared raw
+ * and the trip needs only a short sustained excursion. That is deliberately
+ * quicker than the VQF check: EqF's heading correction is far more aggressive
+ * than VQF's, so every sample spent debouncing is heading already pulled
+ * toward the bad field, while a false trip costs nothing — at rest the heading
+ * needs no mag at all, and the trip clears on motion. The trip stays latched
+ * until rest is left, since un-tripping on the angle wandering back would let
+ * a slowly rotating field through a sample at a time.
+ *
+ * Limitation (accepted): only catches interference that appears or changes
+ * while the tracker is at rest. */
+#define EQF_REST_HEADING_SETTLE_T   1.0f  /* continuous rest before latching (s) */
+#define EQF_REST_HEADING_TH_RAD     (3.0f * DEG_TO_RAD)
+#define EQF_REST_HEADING_DEBOUNCE_T 0.05f /* sustained deviation before tripping (s) */
+
+static float rest_heading_lp[3];     /* LP unit field direction, body frame   */
+static bool  rest_heading_lp_init;
+static float rest_heading_ref[3];    /* unit direction latched at rest entry  */
+static bool  rest_heading_valid;
+static float rest_heading_t;         /* continuous rest accumulated (s)       */
+static float rest_heading_trip_t;    /* deviation sustained so far (s)        */
+static bool  rest_heading_disturbed; /* latched until rest is left            */
+
+static void eqf_rest_heading_reset(void);
+
 /* ── 3×3 matrix helpers (row-major float[9]) ───────────────────────── */
 
 static inline void m3_eye(float *M)
@@ -1072,6 +1119,7 @@ void eqf_init(float g_time, float a_time, float m_time)
 	rest_detected = false;
 	rest_gyr_lp_init = false;
 	rest_acc_lp_init = false;
+	eqf_rest_heading_reset();
 
 	/* pre-fill with identity until TRIAD completes */
 	m3_eye(st.A);
@@ -1111,6 +1159,7 @@ void eqf_load(const void *data)
 	rest_detected = false;
 	rest_gyr_lp_init = false;
 	rest_acc_lp_init = false;
+	eqf_rest_heading_reset();
 	mag_ref_valid = isfinite(st.mag_ref_norm) && st.mag_ref_norm > 0.01f;
 	if (!mag_ref_valid) {
 		st.d_mag[0] = 1.0f;
@@ -1258,6 +1307,97 @@ void eqf_update_accel(float *a, float time)
 		eqf_rest_bias_update();
 }
 
+static void eqf_rest_heading_reset(void)
+{
+	memset(rest_heading_lp, 0, sizeof(rest_heading_lp));
+	rest_heading_lp_init = false;
+	memset(rest_heading_ref, 0, sizeof(rest_heading_ref));
+	rest_heading_valid = false;
+	rest_heading_t = 0.0f;
+	rest_heading_trip_t = 0.0f;
+	rest_heading_disturbed = false;
+}
+
+/* Evaluated before the direction update so the suppression covers the sample
+ * about to be processed rather than one late. Returns true while the field is
+ * judged to have moved under a stationary tracker. */
+static bool eqf_rest_heading_disturbed(const float *m, float dt)
+{
+	float mn = v3_norm(m);
+	if (mn < 1e-10f)
+		return rest_heading_disturbed;
+	float inv = 1.0f / mn;
+	float u[3] = { m[0] * inv, m[1] * inv, m[2] * inv };
+
+	if (!rest_heading_lp_init) {
+		rest_heading_lp[0] = u[0]; rest_heading_lp[1] = u[1]; rest_heading_lp[2] = u[2];
+		rest_heading_lp_init = true;
+	} else if (EQF_MAG_CURRENT_TAU > 0.0f) {
+		float alpha = eqf_alpha_from_tau(EQF_MAG_CURRENT_TAU, dt);
+		rest_heading_lp[0] += alpha * (u[0] - rest_heading_lp[0]);
+		rest_heading_lp[1] += alpha * (u[1] - rest_heading_lp[1]);
+		rest_heading_lp[2] += alpha * (u[2] - rest_heading_lp[2]);
+	} else {
+		rest_heading_lp[0] = u[0]; rest_heading_lp[1] = u[1]; rest_heading_lp[2] = u[2];
+	}
+
+	if (!rest_detected) {
+		/* Motion invalidates the reference: the body-frame field is
+		 * supposed to move. */
+		rest_heading_valid = false;
+		rest_heading_disturbed = false;
+		rest_heading_t = 0.0f;
+		rest_heading_trip_t = 0.0f;
+		return false;
+	}
+
+	if (rest_heading_disturbed) {
+		/* Latched until rest is left. */
+		return true;
+	}
+
+	float ln = v3_norm(rest_heading_lp);
+	if (ln < 1e-10f)
+		return false;
+
+	if (!rest_heading_valid) {
+		rest_heading_t += dt;
+		if (rest_heading_t < EQF_REST_HEADING_SETTLE_T)
+			return false;
+		if (mag_dist_detected) {
+			/* Already flagged by the norm path; latching a known-bad
+			 * direction as the reference would only hide a later change.
+			 * Retry once the field looks clean again. */
+			return false;
+		}
+		float linv = 1.0f / ln;
+		rest_heading_ref[0] = rest_heading_lp[0] * linv;
+		rest_heading_ref[1] = rest_heading_lp[1] * linv;
+		rest_heading_ref[2] = rest_heading_lp[2] * linv;
+		rest_heading_valid = true;
+		rest_heading_trip_t = 0.0f;
+		return false;
+	}
+
+	float c = u[0] * rest_heading_ref[0] + u[1] * rest_heading_ref[1] + u[2] * rest_heading_ref[2];
+	c = eqf_clampf(c, -1.0f, 1.0f);
+	float angle = acosf(c);
+	if (angle < EQF_REST_HEADING_TH_RAD) {
+		rest_heading_trip_t = 0.0f;
+		return false;
+	}
+	rest_heading_trip_t += dt;
+	if (rest_heading_trip_t < EQF_REST_HEADING_DEBOUNCE_T)
+		return false;
+	rest_heading_disturbed = true;
+	return true;
+}
+
+bool eqf_get_rest_heading_disturbed(void)
+{
+	return rest_heading_disturbed;
+}
+
 /* Runtime magnetometer hold (ESB_PONG_FLAG_MAG_HOLD).
  *
  * Setting mag_dist_detected alone is not enough here: unlike VQF, EqF's rejection
@@ -1275,6 +1415,13 @@ void eqf_set_mag_hold(bool hold)
 		mag_active = false;
 		mag_undisturbed_t = 0.0f;
 		mag_candidate_t = 0.0f;
+	} else {
+		/* An explicit release is the host saying the field is trustworthy
+		 * again. Re-baseline the rest-gated check rather than comparing
+		 * against a reference latched before the hold: otherwise a field
+		 * that moved during the hold would keep the mag suppressed until the
+		 * tracker moves, and the hold would not be revertible from the host. */
+		eqf_rest_heading_reset();
 	}
 }
 
@@ -1312,6 +1459,17 @@ void eqf_update_mag(float *m, float time)
 	eqf_dir_update(m, st.d_mag, EQF_SIGMA_MAG, false);
 	return;
 #else
+	/* Rest-gated direction check first: like the hold, this has to skip the
+	 * direction update outright, because EqF's rejection only inflates the
+	 * measurement sigma and would still let the field pull heading. */
+	if (eqf_rest_heading_disturbed(m, dt)) {
+		mag_dist_detected = true;
+		mag_active = false;
+		mag_undisturbed_t = 0.0f;
+		mag_candidate_t = 0.0f;
+		return;
+	}
+
 	float curr_norm, curr_dip;
 	eqf_get_mag_norm_dip(m, &curr_norm, &curr_dip);
 
