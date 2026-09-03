@@ -47,6 +47,12 @@ uint8_t sensor_setup_WOM(void);
 
 void sensor_set_mag_enabled(bool enabled);
 bool sensor_get_mag_enabled(void);
+/* Runtime magnetometer hold: stop the fusion filter trusting the magnetometer and
+ * stop online mag calibration committing, without restarting fusion or touching
+ * flash. Not persisted; cleared on reboot. This is the safe control knob that
+ * sensor_set_mag_enabled() is not. */
+void sensor_set_mag_hold(bool hold);
+bool sensor_get_mag_hold(void);
 bool sensor_get_mag_available(void);
 bool sensor_get_mag_calibrated(void);
 void sensor_refresh_sensor_ids(void);
@@ -56,6 +62,8 @@ void sensor_mag_ref_reset(void);
 bool sensor_fusion_get_rest_detected(void);
 bool sensor_fusion_get_relative_rest_deviations(float out[2]);
 bool sensor_fusion_get_mag_dist_detected(void);
+void sensor_fusion_set_mag_hold(bool hold);
+bool sensor_fusion_get_mag_hold(void);
 void sensor_fusion_reset_mag_ref(void);
 void sensor_fusion_set_mag_ref(float norm, float dip);
 bool sensor_fusion_get_mag_ref(float *norm, float *dip);
@@ -131,6 +139,8 @@ typedef struct sensor_fusion {
 	bool (*get_rest_detected)(void);
 	void (*get_relative_rest_deviations)(float out[2]); /* [gyr, acc] vs thresholds */
 	bool (*get_mag_dist_detected)(void);
+	void (*set_mag_hold)(bool);
+	bool (*get_mag_hold)(void);
 	void (*reset_mag_ref)(void);
 	void (*set_mag_ref)(float norm, float dip);
 	void (*get_mag_ref)(float *norm, float *dip);

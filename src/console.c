@@ -5,6 +5,7 @@
 #include "system/led.h"
 #include "sensor/sensor.h"
 #include "sensor/calibration/calibration.h"
+#include "sensor/calibration/cal_sens.h"
 #if CONFIG_VQF_BENCH
 #include "sensor/fusion/vqf/vqf.h"
 #endif
@@ -663,6 +664,7 @@ static void print_help(void)
 #endif
 	printk("  mag                        Show magnetometer status\n");
 	printk("  mag on|off                 Enable/disable magnetometer\n");
+	printk("  mag hold on|off            Stop/resume fusion trusting the magnetometer\n");
 	printk("  mag auto on|off     Enable/disable online magnetometer calibration\n");
 	printk("  mag clear                  Clear magnetometer calibration\n");
 	printk("  mag cal                    Start magnetometer calibration\n");
@@ -670,6 +672,7 @@ static void print_help(void)
 	printk("  sens <x>,<y>,<z>           Set gyro sensitivity (deg diff over %u rev)\n", (int)CONFIG_SENSOR_SENS_REV);
 	printk("  sens auto <x|y|z> [rev]    Auto-calibrate gyro sensitivity by spinning (default %u rev)\n", SENS_CAL_DEFAULT_REVOLUTIONS);
 	printk("  sens reset                 Reset gyro sensitivity calibration\n");
+	printk("  sens status                Show gyro sensitivity auto-calibration progress\n");
 #endif
 #if CONFIG_SENSOR_USE_TCAL
 	// Update the help string to show the new command set
@@ -793,6 +796,53 @@ void cmd_sens_reset(void)
 		printk("Gyro sensitivity reset.\n");
 	} else {
 		printk("Error: Retained data not available.\n");
+	}
+#else
+	printk("Error: Sensitivity calibration not enabled.\n");
+#endif
+}
+
+void cmd_sens_status(void)
+{
+#if CONFIG_SENSOR_USE_SENS_CALIBRATION
+	static const char *const phase_names[]
+		= {"idle", "hold still", "measuring bias", "armed, spin now", "recording", "done"};
+	static const char *const result_names[] = {
+		"running",
+		"ok",
+		"invalid parameters",
+		"tracker was not still",
+		"gyro timeout",
+		"no bias samples",
+		"no spin detected",
+		"spin did not complete in time",
+		"measured angle too small",
+		"invalid scale",
+		"too much off-axis motion",
+		"scale out of range",
+		"retained data unavailable",
+	};
+	struct sens_cal_report report;
+
+	sens_cal_get_report(&report);
+	printk(
+		"Gyro sensitivity auto-calibration: phase %s, axis %c, run %u\n",
+		report.phase < ARRAY_SIZE(phase_names) ? phase_names[report.phase] : "?",
+		"XYZ"[report.axis > 2 ? 0 : report.axis],
+		(unsigned int)report.seq
+	);
+	printk("  rotated %u deg\n", (unsigned int)report.progress);
+	if (report.phase == SENS_CAL_PHASE_DONE) {
+		printk(
+			"  result: %s\n",
+			report.result < ARRAY_SIZE(result_names) ? result_names[report.result] : "?"
+		);
+		if (report.scale_q12 != 0) {
+			printk(
+				"  scale: %.5f\n",
+				(double)report.scale_q12 / (double)(1 << SENS_CAL_SCALE_Q12_SHIFT)
+			);
+		}
 	}
 #else
 	printk("Error: Sensitivity calibration not enabled.\n");
@@ -1073,7 +1123,10 @@ static void console_cmd_sens(size_t argc, char **argv)
 
 	// check if there are any arguments at all.
 	if (arg == NULL) {
-		printk("Error: Missing arguments. Use 'sens <x>,<y>,<z>', 'sens auto <x|y|z> [rev]', or 'sens reset'.\n");
+		printk(
+			"Error: Missing arguments. Use 'sens <x>,<y>,<z>', 'sens auto <x|y|z> [rev]', 'sens status', or "
+			"'sens reset'.\n"
+		);
 	}
 	// check if this is the auto-calibration subcommand
 	else if (strcmp(arg, "auto") == 0) {
@@ -1086,6 +1139,8 @@ static void console_cmd_sens(size_t argc, char **argv)
 	// check if the argument is "reset"
 	else if (strcmp(arg, "reset") == 0) {
 		cmd_sens_reset();
+	} else if (strcmp(arg, "status") == 0) {
+		cmd_sens_status();
 	} else {
 		char *token;
 		char *endptr;
@@ -1310,6 +1365,7 @@ static void console_cmd_mag(size_t argc, char **argv)
 	if (arg == NULL) {
 		// No argument: show status
 		printk("Magnetometer: %s\n", sensor_get_mag_enabled() ? "enabled" : "disabled");
+		printk("Hold: %s\n", sensor_get_mag_hold() ? "engaged (fusion ignoring mag)" : "released");
 		printk("Hardware: %s\n", sensor_get_sensor_mag_name());
 		printk("Magnetometer matrix:\n");
 		for (int i = 0; i < 3; i++) {
@@ -1337,7 +1393,15 @@ static void console_cmd_mag(size_t argc, char **argv)
 	} else {
 		char *subcmd = arg;
 		if (subcmd == NULL) {
-			printk("Usage: mag [on|off|clear|cal|auto <on|off>]\n");
+			printk("Usage: mag [on|off|hold <on|off>|clear|cal|auto <on|off>]\n");
+		} else if (strcmp(subcmd, "hold") == 0) {
+			if (arg2 == NULL || (strcmp(arg2, "on") != 0 && strcmp(arg2, "off") != 0)) {
+				printk("Usage: mag hold <on|off>\n");
+			} else {
+				bool hold = strcmp(arg2, "on") == 0;
+				sensor_set_mag_hold(hold);
+				printk("Magnetometer hold %s\n", hold ? "engaged" : "released");
+			}
 		} else if (strcmp(subcmd, "on") == 0) {
 			printk("Enabling magnetometer\n");
 			sensor_set_mag_enabled(true);

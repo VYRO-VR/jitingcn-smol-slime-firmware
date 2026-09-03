@@ -371,6 +371,21 @@ bool sensor_fusion_get_mag_dist_detected(void)
 	return sensor_fusion->get_mag_dist_detected();
 }
 
+void sensor_fusion_set_mag_hold(bool hold)
+{
+	if (sensor_fusion && sensor_fusion->set_mag_hold) {
+		sensor_fusion->set_mag_hold(hold);
+	}
+}
+
+bool sensor_fusion_get_mag_hold(void)
+{
+	if (!sensor_fusion || !sensor_fusion->get_mag_hold) {
+		return false;
+	}
+	return sensor_fusion->get_mag_hold();
+}
+
 void sensor_fusion_reset_mag_ref(void)
 {
 	if (sensor_fusion && sensor_fusion->reset_mag_ref) {
@@ -1782,6 +1797,18 @@ void sensor_set_mag_enabled(bool enabled)
 bool sensor_get_mag_enabled(void)
 {
 	return mag_enabled;
+}
+
+void sensor_set_mag_hold(bool hold)
+{
+	sensor_fusion_set_mag_hold(hold);
+	sensor_calibration_set_online_mag_hold(hold);
+	LOG_INF("Magnetometer hold %s", hold ? "engaged" : "released");
+}
+
+bool sensor_get_mag_hold(void)
+{
+	return sensor_fusion_get_mag_hold();
 }
 
 bool sensor_get_mag_available(void)
@@ -3406,8 +3433,13 @@ static void sensor_loop_publish(sensor_loop_frame_t *frame)
 					(double)vqf_info.mag_corr_rate
 				);
 				printk(
-					"     MagDist:%c MagRefNorm:%.3f MagRefDip:%.2f° MagNorm:%.3f MagDip:%.2f°\n",
+					"     MagDist:%c RestHdgDist:%c MagHold:%c\n",
 					vqf_info.mag_dist_detected ? 'Y' : 'N',
+					vqf_info.rest_heading_disturbed ? 'Y' : 'N',
+					sensor_fusion_get_mag_hold() ? 'Y' : 'N'
+				);
+				printk(
+					"     MagRefNorm:%.3f MagRefDip:%.2f° MagNorm:%.3f MagDip:%.2f°\n",
 					(double)vqf_info.mag_ref_norm,
 					(double)vqf_info.mag_ref_dip,
 					(double)vqf_info.mag_norm,

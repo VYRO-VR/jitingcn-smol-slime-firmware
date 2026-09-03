@@ -9,3 +9,7 @@ compile_commands.json
 
 # version
 VERSION
+
+# host test binaries
+tests/host/*/test_*
+!tests/host/*/test_*.c

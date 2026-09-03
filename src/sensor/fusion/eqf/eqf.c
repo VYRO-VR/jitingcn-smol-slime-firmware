@@ -128,6 +128,7 @@ static float mag_candidate_dip;    /* alternative field candidate dip    */
 static float mag_candidate_t;      /* time spent in candidate field      */
 static float mag_undisturbed_t;    /* stable time in current field       */
 static float mag_reject_t;         /* accumulated rejection time         */
+static bool  mag_hold;             /* runtime host-requested mag hold    */
 
 /* ── 3×3 matrix helpers (row-major float[9]) ───────────────────────── */
 
@@ -1257,8 +1258,40 @@ void eqf_update_accel(float *a, float time)
 		eqf_rest_bias_update();
 }
 
+/* Runtime magnetometer hold (ESB_PONG_FLAG_MAG_HOLD).
+ *
+ * Setting mag_dist_detected alone is not enough here: unlike VQF, EqF's rejection
+ * only inflates the measurement sigma (EQF_MAG_REJECTION_SIGMA_SCALE) and still
+ * runs eqf_dir_update, so a "disturbed" EqF keeps letting the mag pull heading.
+ * The update has to be skipped outright. */
+void eqf_set_mag_hold(bool hold)
+{
+	if (hold == mag_hold) {
+		return;
+	}
+	mag_hold = hold;
+	if (hold) {
+		mag_dist_detected = true;
+		mag_active = false;
+		mag_undisturbed_t = 0.0f;
+		mag_candidate_t = 0.0f;
+	}
+}
+
+bool eqf_get_mag_hold(void)
+{
+	return mag_hold;
+}
+
 void eqf_update_mag(float *m, float time)
 {
+	if (mag_hold) {
+		mag_dist_detected = true;
+		mag_active = false;
+		mag_undisturbed_t = 0.0f;
+		mag_candidate_t = 0.0f;
+		return;
+	}
 	float dt = eqf_resolve_dt(time, dt_mag);
 	float mn = v3_norm(m);
 	if (mn < 1e-10f)
@@ -1454,6 +1487,8 @@ const sensor_fusion_t sensor_fusion_eqf = {
 	.get_rest_detected = eqf_get_rest_detected,
 	.get_relative_rest_deviations = eqf_get_relative_rest_deviations,
 	.get_mag_dist_detected = eqf_get_mag_dist_detected,
+	.set_mag_hold     = eqf_set_mag_hold,
+	.get_mag_hold     = eqf_get_mag_hold,
 	.reset_mag_ref    = eqf_reset_mag_ref,
 	.set_mag_ref      = eqf_set_mag_ref,
 	.get_mag_ref      = eqf_get_mag_ref,
