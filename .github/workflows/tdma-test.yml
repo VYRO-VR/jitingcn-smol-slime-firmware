@@ -1,0 +1,170 @@
+name: TDMA test build (Mochi + Fox Dongle + Styria R1)
+
+# Builds a matched tracker/receiver set for TDMA testing straight from the
+# source repos. Each target uses the Zephyr SDK and NCS pinned by its own
+# west.yml, so nothing here overrides the SDK.
+#
+# Defaults:
+#   tracker  Mochi        SlimeVR/SlimeVR-Tracker-nRF          @ tdma
+#   receiver Fox Dongle   jitingcn/SlimeVR-Tracker-nRF-Receiver @ dev
+#   receiver Styria R1    jitingcn/SlimeVR-Tracker-nRF-Receiver @ dev
+# (Fox Dongle and Styria R1 board definitions only exist in the jitingcn fork.)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tracker_repo:
+        description: Tracker repo (owner/name)
+        default: SlimeVR/SlimeVR-Tracker-nRF
+      tracker_ref:
+        description: Tracker branch, tag or SHA
+        default: tdma
+      receiver_repo:
+        description: Receiver repo (owner/name)
+        default: jitingcn/SlimeVR-Tracker-nRF-Receiver
+      receiver_ref:
+        description: Receiver branch, tag or SHA
+        default: dev
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target.filename }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - {role: tracker,  board: "mochi_uf2/nrf52833",       filename: "TDMA_Mochi_Tracker"}
+          - {role: receiver, board: "foxdongle_uf2/nrf52840",   filename: "TDMA_FoxDongle_Receiver"}
+          - {role: receiver, board: "styria_r1_uf2/nrf52840",   filename: "TDMA_Styria_R1_Receiver"}
+    env:
+      REPO: ${{ matrix.target.role == 'tracker' && inputs.tracker_repo || inputs.receiver_repo }}
+      REF: ${{ matrix.target.role == 'tracker' && inputs.tracker_ref || inputs.receiver_ref }}
+    steps:
+      - name: 💻 Checkout firmware source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.REPO }}
+          ref: ${{ env.REF }}
+          path: zephyr-workspace/app
+          submodules: recursive
+
+      - name: 🧰 Install apt dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git cmake ninja-build gperf ccache dfu-util device-tree-compiler wget \
+            python3-dev python3-pip python3-setuptools python3-wheel python3-venv \
+            xz-utils file make gcc gcc-multilib g++-multilib libmagic1
+
+      - name: 📟 Resolve SDK pins from the app's own west.yml
+        id: pins
+        run: |
+          sudo wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+          W=zephyr-workspace/app/west.yml
+          URL=$(yq -r '.manifest.projects[] | select(.name=="sdk-nrf") | .url' "$W")
+          REV=$(yq -r '.manifest.projects[] | select(.name=="sdk-nrf") | .revision' "$W")
+          COMMIT=$(git ls-remote "$URL" "$REV" | awk 'NR==1{print $1}')
+          # Zephyr SDK version: prefer what the repo's own workflow uses.
+          ZSDK=$(grep -h -m1 'ZEPHYR_SDK_VERSION:' zephyr-workspace/app/.github/workflows/*.yml 2>/dev/null | sed -E 's/.*"([^"]+)".*/\1/')
+          ZSDK=${ZSDK:-0.17.4}
+          echo "sdk-url=$URL" >> "$GITHUB_OUTPUT"
+          echo "sdk-rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "sdk-commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "zsdk=$ZSDK" >> "$GITHUB_OUTPUT"
+          echo "app-sha=$(git -C zephyr-workspace/app rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sdk-nrf: $URL @ $REV ($COMMIT), Zephyr SDK $ZSDK"
+
+      - name: 📦 Cache Zephyr SDK
+        id: cache-zsdk
+        uses: actions/cache@v5
+        with:
+          path: ~/zephyr-sdk-${{ steps.pins.outputs.zsdk }}
+          key: tdma-zsdk-${{ steps.pins.outputs.zsdk }}
+
+      - name: 🪁 Install Zephyr SDK
+        if: steps.cache-zsdk.outputs.cache-hit != 'true'
+        run: |
+          V=${{ steps.pins.outputs.zsdk }}
+          FILE="zephyr-sdk-${V}_linux-x86_64_minimal.tar.xz"
+          wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${V}/${FILE}"
+          tar xf "$FILE" -C ~/
+          ~/zephyr-sdk-${V}/setup.sh -c -t arm-zephyr-eabi
+
+      - name: 🪁 Register Zephyr SDK
+        run: |
+          ~/zephyr-sdk-${{ steps.pins.outputs.zsdk }}/setup.sh -c -t arm-zephyr-eabi
+          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-${{ steps.pins.outputs.zsdk }}" >> "$GITHUB_ENV"
+
+      - name: 🐍 Python venv + west
+        run: |
+          python3 -m venv ~/.venv
+          ~/.venv/bin/pip install -q west ninja
+          echo "$HOME/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: 📦 Cache west workspace
+        id: cache-west
+        uses: actions/cache@v5
+        with:
+          path: |
+            zephyr-workspace/.west
+            zephyr-workspace/zephyr
+            zephyr-workspace/nrf
+            zephyr-workspace/modules
+            zephyr-workspace/nrfxlib
+            zephyr-workspace/bootloader
+            zephyr-workspace/tools
+          key: tdma-west-${{ steps.pins.outputs.sdk-commit }}
+
+      - name: ♻️ west init / update
+        run: |
+          cd zephyr-workspace
+          [ -d .west ] || west init -l app
+          west update --narrow -o=--depth=1
+          west zephyr-export
+
+      - name: 🐍 Install NCS / Zephyr / MCUboot Python requirements
+        run: |
+          cd zephyr-workspace
+          pip install -q \
+            -r zephyr/scripts/requirements.txt \
+            -r nrf/scripts/requirements-build.txt \
+            -r bootloader/mcuboot/scripts/requirements.txt
+
+      - name: 🔨 Build ${{ matrix.target.board }}
+        run: |
+          cd zephyr-workspace
+          mkdir -p Releases
+          west build \
+            --board "${{ matrix.target.board }}" \
+            --pristine=always app \
+            --build-dir app/build \
+            -- \
+            -DNCS_TOOLCHAIN_VERSION=NONE \
+            -DBOARD_ROOT=../app
+          for ext in uf2 hex; do
+            src="app/build/app/zephyr/zephyr.${ext}"
+            [ -f "$src" ] && cp "$src" "Releases/${{ matrix.target.filename }}.${ext}" && echo "Saved: ${{ matrix.target.filename }}.${ext}"
+          done
+          ls Releases | grep -q . || { echo "No firmware produced" >&2; exit 1; }
+
+      - name: 🧾 Record source revisions
+        run: |
+          {
+            echo "### ${{ matrix.target.filename }}"
+            echo "- source: \`${{ env.REPO }}\` @ \`${{ env.REF }}\` (\`${{ steps.pins.outputs.app-sha }}\`)"
+            echo "- board: \`${{ matrix.target.board }}\`"
+            echo "- sdk-nrf: ${{ steps.pins.outputs.sdk-url }} @ ${{ steps.pins.outputs.sdk-rev }} (\`${{ steps.pins.outputs.sdk-commit }}\`)"
+            echo "- Zephyr SDK: ${{ steps.pins.outputs.zsdk }}"
+          } | tee zephyr-workspace/Releases/${{ matrix.target.filename }}.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 💾 Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target.filename }}
+          if-no-files-found: error
+          path: zephyr-workspace/Releases/${{ matrix.target.filename }}*
