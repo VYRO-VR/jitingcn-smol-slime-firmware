@@ -1,30 +1,28 @@
 name: TDMA test build (Mochi + Fox Dongle + Styria R1)
 
-# Builds a matched tracker/receiver set for TDMA testing straight from the
-# source repos. Each target uses the Zephyr SDK and NCS pinned by its own
-# west.yml, so nothing here overrides the SDK.
+# Builds OFFICIAL SlimeVR tdma firmware for our hardware, for compatibility
+# testing. Tracker and receiver both come from the official SlimeVR repos and
+# use the SDK pinned by their own west.yml (SlimeVR/sdk-nrf v3.1-slimevr).
 #
-# Defaults:
-#   tracker  Mochi        SlimeVR/SlimeVR-Tracker-nRF          @ tdma
-#   receiver Fox Dongle   jitingcn/SlimeVR-Tracker-nRF-Receiver @ dev
-#   receiver Styria R1    jitingcn/SlimeVR-Tracker-nRF-Receiver @ dev
-# (Fox Dongle and Styria R1 board definitions only exist in the jitingcn fork.)
+#   Mochi tracker      board already exists upstream (mocha-elec/mochi)
+#   Fox Dongle         board dir overlaid from jitingcn receiver `dev`, ported
+#                      from the v3.4 SDK to v3.1 (FEM compatible string, USB
+#                      manufacturer/product Kconfig names)
+#   Styria R1          board dir overlaid from jitingcn receiver `styria`
+#                      (already v3.1-era)
+#
+# The overlay only adds board directories; no upstream firmware source is
+# modified.
 
 on:
   workflow_dispatch:
     inputs:
-      tracker_repo:
-        description: Tracker repo (owner/name)
-        default: SlimeVR/SlimeVR-Tracker-nRF
       tracker_ref:
-        description: Tracker branch, tag or SHA
+        description: Official tracker branch, tag or SHA
         default: tdma
-      receiver_repo:
-        description: Receiver repo (owner/name)
-        default: jitingcn/SlimeVR-Tracker-nRF-Receiver
       receiver_ref:
-        description: Receiver branch, tag or SHA
-        default: dev
+        description: Official receiver branch, tag or SHA
+        default: tdma
 
 permissions:
   contents: read
@@ -37,11 +35,26 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          - {role: tracker,  board: "mochi_uf2/nrf52833",       filename: "TDMA_Mochi_Tracker"}
-          - {role: receiver, board: "foxdongle_uf2/nrf52840",   filename: "TDMA_FoxDongle_Receiver"}
-          - {role: receiver, board: "styria_r1_uf2/nrf52840",   filename: "TDMA_Styria_R1_Receiver"}
+          - role: tracker
+            board: "mochi_uf2/nrf52833"
+            filename: "TDMA_Mochi_Tracker"
+          - role: receiver
+            board: "foxdongle_uf2/nrf52840"
+            filename: "TDMA_FoxDongle_Receiver"
+            overlay_repo: jitingcn/SlimeVR-Tracker-nRF-Receiver
+            overlay_ref: dev
+            overlay_src: boards/foxapplication/foxdongle_uf2
+            overlay_dst: boards/foxapplication/foxdongle_uf2
+            port_v34_to_v31: true
+          - role: receiver
+            board: "styria_r1_uf2/nrf52840"
+            filename: "TDMA_Styria_R1_Receiver"
+            overlay_repo: jitingcn/SlimeVR-Tracker-nRF-Receiver
+            overlay_ref: styria
+            overlay_src: boards/styria/styria_r1
+            overlay_dst: boards/styria/styria_r1
     env:
-      REPO: ${{ matrix.target.role == 'tracker' && inputs.tracker_repo || inputs.receiver_repo }}
+      REPO: ${{ matrix.target.role == 'tracker' && 'SlimeVR/SlimeVR-Tracker-nRF' || 'SlimeVR/SlimeVR-Tracker-nRF-Receiver' }}
       REF: ${{ matrix.target.role == 'tracker' && inputs.tracker_ref || inputs.receiver_ref }}
     steps:
       - name: 💻 Checkout firmware source
@@ -51,6 +64,33 @@ jobs:
           ref: ${{ env.REF }}
           path: zephyr-workspace/app
           submodules: recursive
+
+      - name: 💻 Checkout board overlay source
+        if: matrix.target.overlay_repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ matrix.target.overlay_repo }}
+          ref: ${{ matrix.target.overlay_ref }}
+          path: board-overlay
+
+      - name: 🧩 Overlay board definition
+        if: matrix.target.overlay_repo
+        run: |
+          DST="zephyr-workspace/app/${{ matrix.target.overlay_dst }}"
+          mkdir -p "$(dirname "$DST")"
+          rm -rf "$DST"
+          cp -r "board-overlay/${{ matrix.target.overlay_src }}" "$DST"
+          echo "OVERLAY_SHA=$(git -C board-overlay rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: 🩹 Port board from SDK v3.4 to v3.1
+        if: matrix.target.port_v34_to_v31
+        run: |
+          D="zephyr-workspace/app/${{ matrix.target.overlay_dst }}"
+          # v3.4 FEM binding name -> v3.1 name (same one holyiot_21017 uses upstream)
+          sed -i 's/"radio-fem-two-ctrl-pins"/"generic-fem-two-ctrl-pins"/' "$D"/*.dts
+          # Fork-only Kconfig names -> stock names used by upstream boards (e.g. etee)
+          sed -i 's/CONFIG_SLIMEVR_USB_DEVICE_/CONFIG_USB_DEVICE_/' "$D"/*_defconfig
+          grep -n -E "fem-two-ctrl-pins|USB_DEVICE_" "$D"/*.dts "$D"/*_defconfig
 
       - name: 🧰 Install apt dependencies
         run: |
@@ -158,6 +198,7 @@ jobs:
             echo "### ${{ matrix.target.filename }}"
             echo "- source: \`${{ env.REPO }}\` @ \`${{ env.REF }}\` (\`${{ steps.pins.outputs.app-sha }}\`)"
             echo "- board: \`${{ matrix.target.board }}\`"
+            [ -n "$OVERLAY_SHA" ] && echo "- board definition overlaid from \`${{ matrix.target.overlay_repo }}\` @ \`${{ matrix.target.overlay_ref }}\` (\`$OVERLAY_SHA\`)"
             echo "- sdk-nrf: ${{ steps.pins.outputs.sdk-url }} @ ${{ steps.pins.outputs.sdk-rev }} (\`${{ steps.pins.outputs.sdk-commit }}\`)"
             echo "- Zephyr SDK: ${{ steps.pins.outputs.zsdk }}"
           } | tee zephyr-workspace/Releases/${{ matrix.target.filename }}.txt >> "$GITHUB_STEP_SUMMARY"
