@@ -47,45 +47,22 @@
 #define RAD_TO_DEG 57.29577951308232087680f /* (float)(180.0 / M_PI) */
 #endif
 
+static bool rest_observation_pending;
+
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-/* ---------- Adaptive tauAcc configuration ---------- */
-/*
- * Three-regime adaptive tauAcc strategy:
- *
- * 1. REST (VQF rest detection active):
- *    tauAcc = TAU_ACC_REST (moderate).
- *    At rest the accelerometer cleanly reflects gravity and the rest
- *    bias estimator handles gyro drift, so a moderate tau provides
- *    stable inclination without needing fast correction.
- *
- * 2. GENTLE MOTION (accel close to gravity, low linear acceleration):
- *    tauAcc = TAU_ACC_GENTLE (low).
- *    Slow orientation changes (rolling, tilting) must be tracked
- *    quickly.  A low tau enables fast inclination correction so the
- *    acc LP filter keeps up with the actual gravity direction,
- *    preventing heading drift from stale inclination estimates.
- *
- * 3. AGGRESSIVE MOTION (significant linear acceleration):
- *    tauAcc = TAU_ACC_AGGRESSIVE (higher).
- *    Centripetal / dynamic accelerations corrupt the gravity estimate.
- *    A higher tau rejects these transients at the cost of slower
- *    inclination tracking.
- *
- * The accel deviation |‖a‖ - g| drives a [0,1] motion_intensity
- * with fast-attack / slow-release dynamics.  During motion, tauAcc
- * is linearly interpolated from GENTLE (intensity=0) to AGGRESSIVE
- * (intensity=1).  When rest is detected, TAU_ACC_REST overrides.
- */
-#define ADAPTIVE_TAU_ACC_REST 3.0f       /* tauAcc when at rest (seconds) */
-#define ADAPTIVE_TAU_ACC_GENTLE 2.0f     /* tauAcc during gentle motion (seconds) */
-#define ADAPTIVE_TAU_ACC_AGGRESSIVE 4.3f /* tauAcc under aggressive motion (seconds) */
-#define ADAPTIVE_TAU_ACC_LEVELS 5        /* quantization levels */
-#define ADAPTIVE_ACC_DEV_TH 2.0f         /* accel deviation threshold (m/s²) */
-#define ADAPTIVE_ATTACK_ALPHA 0.4f       /* attack coefficient: fast increase (per sample) */
-#define ADAPTIVE_RELEASE_ALPHA 0.2f      /* release coefficient: slow decrease (per sample) */
-#define TAU_SMOOTH_ALPHA_DOWN 0.21f      /* tauAcc decrease smoothing (per sample) */
-#define TAU_SMOOTH_ALPHA_UP 0.21f        /* tauAcc increase smoothing (per sample) */
-#endif                                   /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
+/* Causal target: 2 * 4^(A-G), with A/G normalized acceleration deviation
+ * and bias-corrected angular speed. No rest override or temperature input.
+ * Log-tau responds faster upward than downward; gyro attitude propagation
+ * remains immediate. See the offline response-gating experiment. */
+#define ADAPTIVE_TAU_MIN 0.5f
+#define ADAPTIVE_TAU_MAX 8.0f
+#define ADAPTIVE_FEATURE_TIME 0.5f
+#define ADAPTIVE_GYR_SCALE 20.0f /* deg/s */
+#define ADAPTIVE_ACC_SCALE 2.0f /* m/s² */
+#define ADAPTIVE_TAU_UP_TIME 0.5f
+#define ADAPTIVE_TAU_DOWN_TIME 1.5f
+#define ADAPTIVE_TAU_INTERVAL 0.5f
+#endif
 
 
 static vqf_params_t params;
@@ -134,10 +111,24 @@ static const size_t vqf_bench_sample_count = sizeof(vqf_bench_gyr_samples) / siz
 #endif
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-/* Adaptive tauAcc state */
-static float motion_intensity;       /* low-pass filtered motion intensity [0,1] */
-static float current_tau_level = -1; /* current quantized level (-1 = unset) */
-static float smoothed_tau;           /* smoothed tauAcc for gradual transitions */
+static float adaptive_gyr_signal, adaptive_acc_signal;
+static float adaptive_log_tau, adaptive_clock;
+static float adaptive_gyr_alpha, adaptive_acc_alpha;
+static float adaptive_up_alpha, adaptive_down_alpha;
+
+static void vqf_reset_adaptive_tau(void)
+{
+	adaptive_gyr_signal = 0.0f;
+	adaptive_acc_signal = 0.0f;
+	adaptive_log_tau = logf(params.tauAcc);
+	adaptive_clock = 0.0f;
+	/* Periods are fixed by init/load, just like the underlying VQF updates.
+	 * Avoid recomputing exponentials at the IMU sample rate. */
+	adaptive_gyr_alpha = 1.0f - expf(-coeffs.gyrTs / ADAPTIVE_FEATURE_TIME);
+	adaptive_acc_alpha = 1.0f - expf(-coeffs.accTs / ADAPTIVE_FEATURE_TIME);
+	adaptive_up_alpha = 1.0f - expf(-coeffs.accTs / ADAPTIVE_TAU_UP_TIME);
+	adaptive_down_alpha = 1.0f - expf(-coeffs.accTs / ADAPTIVE_TAU_DOWN_TIME);
+}
 #endif
 
 /* Rest detection diagnostics */
@@ -166,44 +157,43 @@ void vqf_update_sensor_ids(int imu)
 static void set_params()
 {
 	init_params(&params);
-	params.tauAcc = 3.8f;
+	params.tauAcc = 3.264f;
 	params.biasClip = 5.0f;
-	params.biasForgettingTime = 100.0f;
-	params.biasSigmaInit = 1.0f;
-	params.biasSigmaMotion = 0.28f;
-	params.biasSigmaRest = 0.05f;
+	params.biasForgettingTime = 162.0f;
+	params.biasSigmaInit = 1.32f;
+	params.biasSigmaMotion = 0.1539f;
+	params.biasSigmaRest = 0.0155f;
 	params.biasVerticalForgettingFactor = 0.0001f;
 	params.motionBiasEstEnabled = true;
 	params.restBiasEstEnabled = true;
-	params.restFilterTau = 1.34f;
-	params.restMinT = 2.8f;
-	params.restThGyr = 0.8f;
-	params.restThAcc = 0.08f;
+	params.restFilterTau = 2.6f;
+	params.restMinT = 0.25f;
+	params.restThGyr = 0.4f;
+	params.restThAcc = 0.1f;
 	params.magDistRejectionEnabled = true;
 	params.tauMag = 9.0f;
-	params.magCurrentTau = 0.50f;
+	params.magCurrentTau = 0.20f;
 	params.magNormTh = 0.10f;
-	params.magDipTh = 4.0f;
+	params.magDipTh = 5.0f;
 	params.magRefTau = 10.0f;
-	params.magNewTime = 3.0f;
-	params.magNewFirstTime = 3.0f;
-	params.magNewMinGyr = 20.0f;
+	params.magNewTime = 15.0f;
+	params.magNewFirstTime = 5.0f;
+	params.magNewMinGyr = 10.0f;
 	params.magMinUndisturbedTime = 0.5f;
-	params.magMaxRejectionTime = 3200.0f;
-	params.magRejectionFactor = 1150.0f;
+	params.magMaxRejectionTime = 60.0f;
+	params.magRejectionFactor = 1000.0f;
 }
 
 void vqf_init(float g_time, float a_time, float m_time)
 {
+	rest_observation_pending = false;
 	set_params();
 	vqf_init_gyr_time = g_time;
 	vqf_init_acc_time = a_time;
 	vqf_init_mag_time = m_time;
 	initVqf(&params, &state, &coeffs, g_time, a_time, m_time);
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-	motion_intensity = 0.0f;
-	current_tau_level = -1.0f;
-	smoothed_tau = params.tauAcc;
+	vqf_reset_adaptive_tau();
 #endif
 	rest_enter_count = 0;
 	rest_exit_count = 0;
@@ -272,6 +262,7 @@ static float vqf_safe_init_time(float saved_time, float loaded_time)
 
 void vqf_load(const void *data)
 {
+	rest_observation_pending = false;
 	BUILD_ASSERT(
 		VQF_MEM_SIZE <= sizeof(((struct retained_data *)0)->fusion_data),
 		"VQF state+coeffs exceeds fusion_data buffer in retained memory"
@@ -288,10 +279,14 @@ void vqf_load(const void *data)
 		);
 		return;
 	}
+	/* Retained memory stores state+coeffs, not params or the controller.
+	 * Rebase saved adaptive LP histories to the startup tau without changing
+	 * attitude/bias. Force setTauAcc past its params-only equality shortcut. */
+	float startup_tau = params.tauAcc;
+	params.tauAcc = 0.0f;
+	setTauAcc(&params, &state, &coeffs, startup_tau);
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-	motion_intensity = 0.0f;
-	current_tau_level = -1.0f;
-	smoothed_tau = params.tauAcc;
+	vqf_reset_adaptive_tau();
 #endif
 	rest_enter_count = 0;
 	rest_exit_count = 0;
@@ -327,74 +322,37 @@ void vqf_update_gyro(float *g, float time)
 	}
 	/* Fixed coeffs->gyrTs path (caller-dt / lastGyrTsUs synth disabled for A/B). */
 	updateGyr(&params, &state, &coeffs, g_rad);
+#if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
+	float speed_squared = 0.0f;
+	for (int i = 0; i < 3; i++) {
+		float corrected = g_rad[i] - state.bias[i];
+		speed_squared += corrected * corrected;
+	}
+	float speed = sqrtf(speed_squared) * RAD_TO_DEG;
+	adaptive_gyr_signal += adaptive_gyr_alpha * (speed - adaptive_gyr_signal);
+#endif
+	rest_observation_pending = true;
 }
 
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-/**
- * @brief Pre-accel-update processing: adaptive tauAcc (experimental).
- *
- * Called before each accelerometer update to adjust VQF parameters based on
- * current motion intensity and temperature dynamics.
- *
- * @param a_m_s2 accelerometer reading in m/s²
- */
+/* Called only for valid, nonzero acceleration samples, before updateAcc. */
 static void vqf_pre_accel_update(const float a_m_s2[3])
 {
-	/* --- Adaptive tauAcc based on motion intensity --- */
-	float a_norm = sqrtf(a_m_s2[0] * a_m_s2[0] + a_m_s2[1] * a_m_s2[1] + a_m_s2[2] * a_m_s2[2]);
-	float a_dev = fabsf(a_norm - CONST_EARTH_GRAVITY);
-	float alpha_inst = fminf(a_dev / ADAPTIVE_ACC_DEV_TH, 1.0f);
-
-	/* Attack-release envelope: fast increase (detect motion quickly),
-	 * slow decrease (sustain elevated tau after motion stops) */
-	if (alpha_inst > motion_intensity) {
-		motion_intensity += ADAPTIVE_ATTACK_ALPHA * (alpha_inst - motion_intensity);
-	} else {
-		motion_intensity += ADAPTIVE_RELEASE_ALPHA * (alpha_inst - motion_intensity);
-	}
-
-	/*
-	 * Compute target tauAcc:
-	 * - Rest detected: use rest tauAcc
-	 * - Motion: linearly interpolate from GENTLE (intensity=0) to
-	 *   AGGRESSIVE (intensity=1).  This supports both increasing and
-	 *   decreasing curves depending on how the defines are set.
-	 */
-	float target_tau;
-	if (state.restDetected) {
-		target_tau = ADAPTIVE_TAU_ACC_REST;
-	} else {
-		target_tau
-			= ADAPTIVE_TAU_ACC_GENTLE + (ADAPTIVE_TAU_ACC_AGGRESSIVE - ADAPTIVE_TAU_ACC_GENTLE) * motion_intensity;
-	}
-
-	/*
-	 * Smooth tauAcc transitions to avoid Butterworth LP filter transients.
-	 * Decrease (rest→motion) is slow to prevent heading coupling from the
-	 * sudden acc correction gain change.  Increase (motion→rest) is fast
-	 * so the filter settles quickly at rest.
-	 */
-	float tau_alpha = (target_tau < smoothed_tau) ? TAU_SMOOTH_ALPHA_DOWN : TAU_SMOOTH_ALPHA_UP;
-	smoothed_tau += tau_alpha * (target_tau - smoothed_tau);
-
-	/*
-	 * Quantize target_tau directly to avoid unnecessary setTauAcc() calls.
-	 * The step size is derived from the full possible range of tauAcc values.
-	 */
-	float tau_min = fminf(fminf(ADAPTIVE_TAU_ACC_REST, ADAPTIVE_TAU_ACC_GENTLE), ADAPTIVE_TAU_ACC_AGGRESSIVE);
-	float tau_max = fmaxf(fmaxf(ADAPTIVE_TAU_ACC_REST, ADAPTIVE_TAU_ACC_GENTLE), ADAPTIVE_TAU_ACC_AGGRESSIVE);
-	float tau_step = (tau_max - tau_min) / ADAPTIVE_TAU_ACC_LEVELS;
-	float quantized_tau;
-	if (tau_step > 0.001f) {
-		quantized_tau = tau_min + roundf((smoothed_tau - tau_min) / tau_step) * tau_step;
-		quantized_tau = fmaxf(tau_min, fminf(quantized_tau, tau_max));
-	} else {
-		quantized_tau = smoothed_tau;
-	}
-
-	if (quantized_tau != current_tau_level) {
-		current_tau_level = quantized_tau;
-		setTauAcc(&params, &state, &coeffs, quantized_tau);
+	float norm = sqrtf(a_m_s2[0] * a_m_s2[0] + a_m_s2[1] * a_m_s2[1] + a_m_s2[2] * a_m_s2[2]);
+	float deviation = fabsf(norm - CONST_EARTH_GRAVITY);
+	adaptive_acc_signal += adaptive_acc_alpha * (deviation - adaptive_acc_signal);
+	float g = adaptive_gyr_signal / (adaptive_gyr_signal + ADAPTIVE_GYR_SCALE);
+	float a = adaptive_acc_signal / (adaptive_acc_signal + ADAPTIVE_ACC_SCALE);
+	float fraction = 0.5f + 0.5f * (a - g);
+	float target = logf(ADAPTIVE_TAU_MIN) + fraction * logf(ADAPTIVE_TAU_MAX / ADAPTIVE_TAU_MIN);
+	float alpha = target > adaptive_log_tau ? adaptive_up_alpha : adaptive_down_alpha;
+	adaptive_log_tau += alpha * (target - adaptive_log_tau);
+	adaptive_clock += coeffs.accTs;
+	if (adaptive_clock >= ADAPTIVE_TAU_INTERVAL) {
+		adaptive_clock = fmodf(adaptive_clock, ADAPTIVE_TAU_INTERVAL);
+		float tau = fmaxf(ADAPTIVE_TAU_MIN, fminf(ADAPTIVE_TAU_MAX, expf(adaptive_log_tau)));
+		/* Updates both inclination and motion-bias LP states continuously. */
+		setTauAcc(&params, &state, &coeffs, tau);
 	}
 }
 #endif /* CONFIG_VQF_ADAPTIVE_TAU_ACC */
@@ -449,12 +407,15 @@ void vqf_update_accel(float *a, float time)
 	}
 	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0) {
 		memcpy(last_a, a_m_s2, sizeof(a_m_s2));
-	}
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
-	vqf_pre_accel_update(a_m_s2);
+		vqf_pre_accel_update(a_m_s2);
 #endif
+	}
 	/* Fixed coeffs->accTs path (caller-dt / lastAccTsUs synth disabled for A/B). */
 	updateAcc(&params, &state, &coeffs, a_m_s2);
+	if (a_m_s2[0] != 0 || a_m_s2[1] != 0 || a_m_s2[2] != 0) {
+		rest_observation_pending = true;
+	}
 	vqf_track_rest_diag();
 }
 
@@ -679,6 +640,59 @@ void vqf_set_gyro_bias(float *g_off)
 	setBiasEstimate(&state, g_off_rad, -1);
 }
 
+void vqf_rebase_gyro_bias(const float delta_dps[3])
+{
+	/* Change input coordinates, not the physical bias estimate. Do not use
+	 * setBiasEstimate(), reset covariance, or clip the translated residual. */
+	vqf_real_t delta[3];
+	for (int i = 0; i < 3; i++) {
+		delta[i] = delta_dps[i] * DEG_TO_RAD;
+		state.bias[i] += delta[i];
+		state.restLastGyrLp[i] += delta[i];
+	}
+
+	/* filterVec initially stores [NaN, count, sums...], then switches to
+	 * transposed direct-form II pairs. No samples means all-NaN: leave it
+	 * untouched so the first sample initializes in the new coordinates.
+	 * Use the bit-based finite check even for the native NaN markers. */
+	if (!vqf_float_finite((float)state.restGyrLpState[0])) {
+		if (vqf_float_finite((float)state.restGyrLpState[1])) {
+			for (int i = 0; i < 3; i++) {
+				state.restGyrLpState[2 + i] += state.restGyrLpState[1] * (vqf_double_t)delta[i];
+			}
+		}
+	} else {
+		for (int i = 0; i < 3; i++) {
+			state.restGyrLpState[2 * i] += (vqf_double_t)delta[i] * ((vqf_double_t)1 - coeffs.restGyrLpB[0]);
+			state.restGyrLpState[2 * i + 1] += (vqf_double_t)delta[i] * (coeffs.restGyrLpB[2] - coeffs.restGyrLpA[1]);
+		}
+	}
+
+	/* LP(R*b) becomes LP(R*b) + LP(R)*delta. Both native filters advance
+	 * together, including their averaging/count initialization. Translate
+	 * the two earth-horizontal rows using their actual R history, not the
+	 * current attitude or a constant steady-state approximation. */
+	if (!vqf_float_finite((float)state.motionBiasEstBiasLpState[0])) {
+		if (vqf_float_finite((float)state.motionBiasEstBiasLpState[1])) {
+			for (int row = 0; row < 2; row++) {
+				for (int col = 0; col < 3; col++) {
+					state.motionBiasEstBiasLpState[2 + row] +=
+						state.motionBiasEstRLpState[2 + 3 * row + col] * (vqf_double_t)delta[col];
+				}
+			}
+		}
+	} else {
+		for (int row = 0; row < 2; row++) {
+			for (int col = 0; col < 3; col++) {
+				for (int k = 0; k < 2; k++) {
+					state.motionBiasEstBiasLpState[2 * row + k] +=
+						state.motionBiasEstRLpState[2 * (3 * row + col) + k] * (vqf_double_t)delta[col];
+				}
+			}
+		}
+	}
+}
+
 void vqf_update_gyro_sanity(float *g, float *m)
 {
 	// TODO: does vqf tell us a "recovery state"
@@ -717,19 +731,43 @@ bool vqf_get_rest_detected(void)
 	return getRestDetected(&state);
 }
 
+static bool vqf_take_rest_observation(bool *out)
+{
+	bool pending = rest_observation_pending;
+	rest_observation_pending = false;
+	if (pending && out) {
+		*out = vqf_get_rest_detected();
+	}
+	return pending;
+}
+
 bool vqf_get_mag_dist_detected(void)
 {
 	return getMagDistDetected(&state);
 }
 
-void vqf_reset_mag_ref(void)
-{
-	setMagRef(&state, 0, 0);
-}
-
-void vqf_set_mag_ref(float norm, float dip)
+static void vqf_rebase_mag(float norm, float dip)
 {
 	setMagRef(&state, norm, dip);
+	state.magDistDetected = true;
+	state.magUndisturbedT = 0.0f;
+	state.magRejectT = 0.0f;
+	state.magCandidateNorm = -1.0f;
+	state.magCandidateDip = 0.0f;
+	state.magCandidateT = 0.0f;
+	state.magNormDip[0] = state.magNormDip[1] = 0.0f;
+	for (unsigned i = 0; i < 4; i++) {
+		state.magNormDipLpState[i] = NAN;
+	}
+	state.kMagInit = 0.0f;
+	state.lastMagDisAngle = 0.0f;
+	state.lastMagCorrAngularRate = 0.0f;
+	state.lastMagTsUs = 0;
+}
+
+static void vqf_get_quat6(float *q)
+{
+	getQuat6D(&state, q);
 }
 
 float vqf_get_mag_ref_norm(void)
@@ -751,11 +789,6 @@ float vqf_get_delta(void)
 void vqf_set_delta(float delta)
 {
 	state.delta = delta;
-}
-
-void vqf_get_relative_rest_deviations(float *out)
-{
-	getRelativeRestDeviations(&params, &state, out);
 }
 
 void vqf_get_debug_info(vqf_debug_info_t *info)
@@ -819,7 +852,8 @@ void vqf_get_debug_info(vqf_debug_info_t *info)
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
 	// Adaptive tauAcc state
 	info->tau_acc = params.tauAcc;
-	info->motion_intensity = motion_intensity;
+	info->acc_deviation = adaptive_acc_signal / (adaptive_acc_signal + ADAPTIVE_ACC_SCALE);
+	info->angular_speed = adaptive_gyr_signal / (adaptive_gyr_signal + ADAPTIVE_GYR_SCALE);
 #endif
 
 	// Rest detection diagnostics
@@ -1129,6 +1163,7 @@ const sensor_fusion_t sensor_fusion_vqf = {
 
 	.get_gyro_bias = vqf_get_gyro_bias,
 	.set_gyro_bias = vqf_set_gyro_bias,
+	.rebase_gyro_bias = vqf_rebase_gyro_bias,
 
 	.update_gyro_sanity = vqf_update_gyro_sanity,
 	.get_gyro_sanity = vqf_get_gyro_sanity,
@@ -1137,11 +1172,11 @@ const sensor_fusion_t sensor_fusion_vqf = {
 	.get_quat = vqf_get_quat,
 
 	.get_rest_detected = vqf_get_rest_detected,
-	.get_relative_rest_deviations = vqf_get_relative_rest_deviations,
+	.take_rest_observation = vqf_take_rest_observation,
 	.get_mag_dist_detected = vqf_get_mag_dist_detected,
 	.set_mag_hold = vqf_set_mag_hold,
 	.get_mag_hold = vqf_get_mag_hold,
-	.reset_mag_ref = vqf_reset_mag_ref,
-	.set_mag_ref = vqf_set_mag_ref,
+	.get_quat6 = vqf_get_quat6,
+	.rebase_mag = vqf_rebase_mag,
 	.get_mag_ref = vqf_get_mag_ref,
 };

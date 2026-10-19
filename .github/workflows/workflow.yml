@@ -9,10 +9,6 @@ on:
       - dev
     tags:
       - "*"
-  create:
-  release:
-    types:
-      - published
   workflow_dispatch:
 
 concurrency:
@@ -22,11 +18,12 @@ concurrency:
 permissions: write-all
 
 env:
-  ZEPHYR_SDK_VERSION: "0.17.4"
+  ZEPHYR_SDK_VERSION: "1.0.1"
+  ZEPHYR_TOOLCHAIN_VARIANT: "zephyr/gnu"
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       sdk-hash: ${{ steps.generate-vars.outputs.sdk-hash }}
       sdk-revision: ${{ steps.generate-vars.outputs.sdk-revision }}
@@ -103,7 +100,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
-          key: zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
+          key: zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}-${{ runner.os }}-${{ runner.arch }}-gnu-arm
 
       - name: 🪁 Install Zephyr SDK
         id: install-sdk
@@ -132,15 +129,13 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.venv
-          # "bootstrap" suffix retires the old venv-* caches, which carry
-          # packages from before the NCS 3.3 migration.
-          key: venv-bootstrap-${{ env.ZEPHYR_SDK_VERSION }}
+          key: venv-bootstrap-ubuntu-24.04-py3.12-${{ env.ZEPHYR_SDK_VERSION }}
 
       - name: 🐍 Setup Python venv + West
         id: setup-venv
         if: steps.cache-venv.outputs.cache-hit != 'true'
         run: |
-          python3 -m venv ~/.venv
+          python3.12 -m venv ~/.venv
           ~/.venv/bin/pip install west ninja
 
       - name: ♻️ Initialize Zephyr Workspace
@@ -160,10 +155,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ~/.venv
-          # requirements.txt is only a list of "-r requirements-*.txt" includes
-          # and rarely changes across SDK upgrades, so hash the included files
-          # too (plus the nrf/mcuboot requirement sets installed below).
-          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements*.txt', 'zephyr-workspace/nrf/scripts/requirements-build.txt', 'zephyr-workspace/bootloader/mcuboot/scripts/requirements.txt') }}
+          key: venv-pip-ubuntu-24.04-py3.12-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements*.txt', 'zephyr-workspace/nrf/scripts/requirements-build.txt', 'zephyr-workspace/bootloader/mcuboot/scripts/requirements.txt') }}
 
       - name: 🐍 Install NCS, Zephyr, and MCUboot Python Requirements
         id: install-pip
@@ -234,8 +226,11 @@ jobs:
                   # {boardname: "nekonya_tracker_uf2/nrf52833", filename: "nekonya_tracker_uf2"},
                   # {boardname: "estmini_uf2/nrf52840", filename: "Estmini_Tracker"},
                   # {boardname: "paper_smol_v1_uf2/nrf52833", filename: "paper_smol_v1_uf2"},
+                  # {boardname: "miro_uf2/nrf52833", filename: "Miro_Tracker"},
+                  # {boardname: "sk_cheesecake_nrf_p00/nrf52840/uf2", filename: "SlimeNRF_SK_Cheesecake_P00_Tracker"},
+                  # {boardname: "sk_cheesecake_nrf_p10/nrf52840/uf2", filename: "SlimeNRF_SK_Cheesecake_P10_Tracker"},
                 ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: 💻 Checkout Repository
         uses: actions/checkout@v6
@@ -259,13 +254,14 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
-          key: zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
+          key: zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}-${{ runner.os }}-${{ runner.arch }}-gnu-arm
           fail-on-cache-miss: true
 
       - name: 🪁 Register Zephyr SDK
         id: register-sdk
         run: |
           ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}/setup.sh -c -t arm-zephyr-eabi
+          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}" >> "$GITHUB_ENV"
 
       - name: 📦 Restore West Workspace
         id: restore-west
@@ -287,9 +283,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ~/.venv
-          # No restore-keys fallback: a stale venv from an older SDK is worse
-          # than a loud cache miss (the setup job saves this exact key).
-          key: venv-pip-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements*.txt', 'zephyr-workspace/nrf/scripts/requirements-build.txt', 'zephyr-workspace/bootloader/mcuboot/scripts/requirements.txt') }}
+          key: venv-pip-ubuntu-24.04-py3.12-${{ env.ZEPHYR_SDK_VERSION }}-${{ hashFiles('zephyr-workspace/zephyr/scripts/requirements*.txt', 'zephyr-workspace/nrf/scripts/requirements-build.txt', 'zephyr-workspace/bootloader/mcuboot/scripts/requirements.txt') }}
           fail-on-cache-miss: true
 
       - name: ♻️ Register Zephyr Workspace
@@ -323,7 +317,6 @@ jobs:
           if [ "${{ matrix.boards.with_softdevice }}" = "true" ]; then
             EXTRA_CMAKE_ARGS+=(
               -DWITH_SOFTDEVICE=ON
-              -DCONFIG_FLASH_LOAD_OFFSET=0x27000
             )
           fi
           if [ -n "${{ matrix.boards.file_suffix }}" ]; then
@@ -335,7 +328,6 @@ jobs:
               --pristine=always "$REPO_DIR" \
               --build-dir "$REPO_DIR/build" \
               -- \
-              -DNCS_TOOLCHAIN_VERSION=NONE \
               -DBOARD_ROOT=../"$REPO_DIR" \
               "${EXTRA_CMAKE_ARGS[@]}"
 
@@ -455,18 +447,14 @@ jobs:
     if: >-
       ${{
         needs.build.result == 'success'
-        && (
-          github.event_name == 'release'
-          || github.ref_type == 'tag'
-          || (github.event_name == 'create' && github.event.ref_type == 'tag')
-        )
+        && github.ref_type == 'tag'
       }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: write
     env:
-      RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name || github.event.ref }}
+      RELEASE_TAG: ${{ github.ref_name }}
     steps:
       - name: 📥 Download Firmware Artifacts
         uses: actions/download-artifact@v7

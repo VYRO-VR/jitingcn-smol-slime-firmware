@@ -29,6 +29,10 @@ uint32_t get_ping_interval_ms(void);
 void connection_print_ping_stats(void);
 /** Force the next PING to run immediately without old receiver-time slot gating. */
 void connection_request_ping_resync(void);
+/** Wake the single connection owner for newly due event work. */
+void connection_tracker_event_wake(void);
+/* Recompute maintenance facts after applied raw/debug/bench/capture changes. */
+void connection_feedback_maintenance_update(void);
 void connection_clocks_request_start(void);
 void connection_clocks_request_start_delay_us(uint32_t delay_us);
 void connection_clocks_request_stop(void);
@@ -45,13 +49,6 @@ void connection_update_sensor_temp(float temp);
 void connection_update_battery(bool battery_available, bool plugged, bool charged, uint32_t battery_pptt, int battery_mV);
 void connection_update_status(int status);
 
-bool connection_write_packet_0();
-bool connection_write_packet_1();
-bool connection_write_packet_2();
-bool connection_write_packet_3();
-bool connection_write_packet_4();
-bool connection_write_packet_5();
-bool connection_write_packet_sens_cal();
 
 // Raw sensor data collection (runtime controlled via PONG command)
 
@@ -65,8 +62,8 @@ struct raw_imu_sample {
 void connection_set_data_collection(bool enable);
 bool connection_get_data_collection(void);
 
-// Batch raw sensor data collection (runtime controlled via PONG command)
-void connection_set_data_collection_batch(bool enable, uint16_t rate_hz);
+// Returns -EBUSY for an active session's rate change; stop before restarting.
+int connection_set_data_collection_batch(bool enable, uint16_t rate_hz);
 bool connection_get_data_collection_batch(void);
 uint16_t connection_get_data_collection_batch_rate(void);
 
@@ -74,28 +71,33 @@ uint16_t connection_get_data_collection_batch_rate(void);
 void connection_set_ota_suppressed(bool suppressed);
 bool connection_get_ota_suppressed(void);
 
-// Queue a raw IMU sample for transmission (called from sensor thread)
+// Queue a raw IMU sample for transmission (called from sensor thread).
+// Samples during the first five seconds of a session are intentionally
+// discarded while metadata/calibration establishes the recording baseline.
 void connection_queue_raw_sample(const struct raw_imu_sample *sample);
+bool connection_raw_collection_startup_done(void);
 
-// Queue uncalibrated magnetometer data for body-frame raw transport
+// Queue uncalibrated magnetometer data for body-frame raw transport.
 void connection_queue_raw_mag(const float mag[3]);
-
 /* Raw meta: gyro_odr = raw TX rate (fusion INT_merge Hz); chip/fusion Hz after mag_id. */
 void connection_send_raw_metadata(float gyro_range, float accel_range,
 				  float gyro_odr, float accel_odr,
 				  float mag_odr, uint8_t imu_id, uint8_t mag_id,
 				  float chip_gyro_hz, float fusion_gyro_hz);
 
+/* Queue a receiver-requested metadata/calibration subset. The connection
+ * thread owns transmission; calls are safe from ESB event context. */
+void connection_request_raw_metadata(uint8_t mask, uint8_t chunk, uint16_t token);
 
-/* Send calibration drip packets (after metadata). include_tcal=false skips
- * the T-Cal state/points chunks (batch mode re-sends; sent once at start). */
-void connection_send_raw_calibration(bool include_tcal);
-
-// Check if metadata needs periodic re-send (returns true if due)
-bool connection_raw_metadata_resend_due(void);
+/* ISR/thread-safe, bounded and non-sleeping. 0 = queued or already pending,
+ * -ENOSPC = full (new request dropped), -EACCES = inactive or batch mode.
+ * Connection owns deduplication, FIFO order and session resets; history
+ * validity is checked by its sending thread, never by the ISR. */
+int connection_request_raw_retransmit(uint16_t sequence);
 
 // Drain queued raw data and transmit (called from connection thread)
-// Returns true if a packet was sent
+// Returns true if a packet was sent or an admission was deliberately retried.
 bool connection_process_raw_data(void);
+
 
 #endif
