@@ -1251,8 +1251,6 @@ static void sensor_drain_mode(void)
 
 void sensor_scan_thread(void)
 {
-	int err;
-
 	/* The sensor loop only registers WDT_CHANNEL_SENSOR after sensor_init()
 	 * succeeds; discovery/init itself was previously unmonitored. Cover this
 	 * phase so a blocked sensor bus reboots instead of freezing forever. */
