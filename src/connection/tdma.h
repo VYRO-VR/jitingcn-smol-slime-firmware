@@ -43,11 +43,14 @@
  * the following owner remains silent for that frame. Empty opportunities do
  * not cause transmissions.
  *
- * Parameters are dynamically assigned by the receiver via PONG bytes 8-11:
- *   byte 8:  assigned_slot_index (0-15, or 0xFF = unassigned)
- *   byte 9:  total_slots (1-16)
+ * Parameters are dynamically assigned by NORMAL PONG bytes 8-11:
+ *   byte 8:  assigned slot_index (0-15), or 0xFF when unassigned
+ *   byte 9:  total_slots (0-16); a usable slot must be below total
  *   byte 10: slot_ticks (22 for the measured-safe nRF52 guarded mode)
  *   byte 11: config_epoch (wrapping uint8_t)
+ * This legacy layout is unchanged. The separately requested CHANNEL_CONFIRM
+ * PONG (0x37) carries channel proof, not TDMA parameters.
+ * PONG remains 13 bytes with CRC at byte 12; other command layouts are unchanged.
  *
  * Normal NoACK traffic is limited to one packet per tracker frame. Before
  * queueing, payload-aware admission reserves measured READY->END airtime plus
@@ -106,11 +109,27 @@ void tdma_print_stats(void);
  * Enable or disable TDMA at runtime.
  */
 void tdma_set_enabled(bool enabled);
+int tdma_user_set_enabled(bool enabled);
 
 /**
  * Check if TDMA is currently active (compiled in AND runtime enabled).
  */
 bool tdma_is_enabled(void);
+
+/**
+ * Read-only status-clock eligibility: authoritative sync age limit in ms,
+ * or -1 if TDMA is compiled out, disabled, or has no valid slot config.
+ * Call under irq_lock when snapshotting alongside ESB synchronization state.
+ */
+int64_t tdma_status_clock_max_age_ms(void);
+
+/**
+ * True while a data packet is refused admission only because receiver time is
+ * missing or stale. Every attempt is then rejected before the radio is
+ * touched, so callers that retry a refused payload must back off instead of
+ * polling at millisecond cadence.
+ */
+bool tdma_admission_stalled(void);
 
 /**
  * Current TDMA frame width in 32768 Hz server ticks (0 = no dynamic config yet).

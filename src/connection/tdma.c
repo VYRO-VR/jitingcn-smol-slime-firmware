@@ -22,6 +22,8 @@
 */
 #include "tdma.h"
 #include "esb.h"
+#include "system/led.h"
+#include <errno.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -186,6 +188,19 @@ static bool tdma_config_snapshot(
 		&& *total_slots > 0 && *slot_index < *total_slots;
 }
 
+int64_t tdma_status_clock_max_age_ms(void)
+{
+#if CONFIG_CONNECTION_TDMA
+	uint32_t pack;
+	uint8_t slot_index, total_slots, slot_ticks;
+	uint16_t frame_ticks;
+	if (tdma_config_snapshot(&pack, &slot_index, &total_slots, &slot_ticks, &frame_ticks)) {
+		return TDMA_SYNC_STALE_MS;
+	}
+#endif
+	return -1;
+}
+
 static bool tdma_data_frame_guarded(
 	uint64_t frame_number,
 	uint8_t slot_index,
@@ -287,7 +302,9 @@ static bool tdma_wait_for_data_admission(uint8_t reserve_ticks)
 		uint64_t target = target_frame * frame_ticks + slot_start + TDMA_SLOT_TARGET_OFFSET;
 		uint64_t own_ping_frame = frame_number - frame_number % period_frames
 			+ tdma_ping_phase_frame(slot_index, total_slots, period_frames);
-		if (own_ping_frame <= frame_number) {
+		/* The current frame's PING can still be ahead of us. Keep it as a
+		 * barrier so a data wait cannot sleep through that guarded window. */
+		if (own_ping_frame < frame_number) {
 			own_ping_frame += period_frames;
 		}
 		uint64_t own_ping_target = own_ping_frame * frame_ticks
@@ -400,6 +417,14 @@ enum tdma_ping_admission tdma_wait_for_ping_window(void)
 	if (!in_current_window) {
 		if (target - server_ticks > frame_ticks) {
 			tdma_ping_deferred_frame++;
+			uint64_t wake_ticks = target - server_ticks - frame_ticks;
+			/* The coarse millisecond wake can arrive less than 1 ms before
+			 * preparation is allowed. Yield only that rounding remainder.
+			 * A changed schedule farther away must return to serving data,
+			 * not block here until its new PING window. */
+			if (wake_ticks <= 32768U / 1000U) {
+				tdma_sleep_network_ticks(wake_ticks);
+			}
 			return TDMA_PING_DEFERRED;
 		}
 		tdma_wait_until_network_tick(target);
@@ -469,6 +494,19 @@ void tdma_set_enabled(bool enabled)
 #endif
 }
 
+int tdma_user_set_enabled(bool enabled)
+{
+#if CONFIG_CONNECTION_TDMA
+	tdma_set_enabled(enabled);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_SUCCESS);
+	return 0;
+#else
+	ARG_UNUSED(enabled);
+	led_request_event(LED_OWNER_RADIO, led_request_id(), led_event_id(), LED_REJECTED);
+	return -ENOTSUP;
+#endif
+}
+
 uint16_t tdma_frame_ticks_get(void)
 {
 	uint32_t pack = (uint32_t)atomic_get(&tdma_cfg_pack);
@@ -501,6 +539,19 @@ bool tdma_is_enabled(void)
 #else
 	return false;
 #endif
+}
+
+bool tdma_admission_stalled(void)
+{
+	/* Every TDMA config is validated before it can enable admission, so a
+	 * missing runtime config is "not stalled" rather than a permanent stall. */
+	if (!atomic_get(&tdma_runtime_enabled)) {
+		return false;
+	}
+	/* Mirrors the refusal in tdma_wait_for_data_admission(): without receiver
+	 * time there is no slot to wait for, so admission fails immediately. */
+	int64_t sync_age = esb_get_sync_age_ms();
+	return sync_age < 0 || sync_age > TDMA_SYNC_STALE_MS;
 }
 
 void tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch)

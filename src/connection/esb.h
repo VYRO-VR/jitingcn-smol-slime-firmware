@@ -71,23 +71,47 @@ int esb_initialize(bool);
 void esb_deinitialize(void);
 /* Quiesce TX then re-init PTX (channel/NVS already applied in esb_initialize). */
 int esb_reinitialize(void);
+/* Channel control holds this boundary across storage and radio reinit. */
+void esb_channel_control_begin(void);
+void esb_channel_control_end(void);
+/* Connection-owner rendezvous service; true reserves this iteration. */
+bool esb_channel_search_poll(bool blocked);
 
 void esb_set_addr_discovery(void);
 void esb_set_addr_paired(void);
 
-void esb_set_pair(uint64_t addr);
+int esb_set_pair(uint64_t addr);
 
 void esb_pair(void);
 void esb_reset_pair(void);
-void esb_clear_pair(void);
+int esb_clear_pair(void);
+int esb_user_pair(void);
+int esb_user_set_enabled(bool enabled);
 
 void esb_process_ota_rx_queue(void);
 int esb_write(uint8_t *data, bool no_ack, size_t data_length);
+/* Start the clock before guarded admission; -EAGAIN defers with HFXO warm.
+ * force_resync bypasses admission for unslotted startup recovery. */
+int esb_write_ping(uint8_t *data, bool force_resync);
+
+/**
+ * Coherent, read-only status clock snapshot (both output pointers required).
+ * Always fills local_ticks with low32 local time in the fixed 32768 Hz domain.
+ * network_ticks defaults to local_ticks; true means a paired, error-free
+ * connection with valid runtime TDMA config and a fresh accepted time sync.
+ * A synchronized network_ticks value of zero is valid. No epoch unwrapping.
+ */
+bool esb_get_status_clock(uint32_t *local_ticks, uint32_t *network_ticks);
 
 #define PING_INTERVAL_MS 997
 // Ping/Pong types for ACK payload validation
 #define ESB_PING_TYPE 0xF0
 #define ESB_PONG_TYPE 0xF1
+/* PING byte 7: low seven bits acknowledge commands; bit 7 requests channel proof. */
+#define ESB_PING_FLAG_CHANNEL_CONFIRM 0x80
+/* Response only: physical channel, version, two zero reserved bytes at 8..11. */
+#define ESB_PONG_FLAG_CHANNEL_CONFIRM 0x37
+#define ESB_CHANNEL_CONFIRM_VERSION 1
 
 // Ping/Pong packet sizes
 #define ESB_PING_LEN 13 // with CRC-8
@@ -100,7 +124,7 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 #define ESB_PONG_FLAG_NORMAL 0x00
 #define ESB_PONG_FLAG_SHUTDOWN 0x01
 #define ESB_PONG_FLAG_CALIBRATE 0x02     // Trigger gyro/accel ZRO calibration
-#define ESB_PONG_FLAG_SIX_SIDE_CAL 0x03  // Trigger 6-point accelerometer calibration
+#define ESB_PONG_FLAG_CALIBRATE_ACC 0x03 // Trigger 18-orientation accelerometer calibration
 #define ESB_PONG_FLAG_MEOW 0x04          // Trigger meow output
 #define ESB_PONG_FLAG_SCAN 0x05          // Trigger sensor scan
 #define ESB_PONG_FLAG_MAG_CLEAR 0x06     // Clear magnetometer calibration
@@ -136,16 +160,23 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 #define ESB_PONG_FLAG_SENS_AUTO 0x24        // Auto-calibrate gyro sensitivity
 #define ESB_PONG_FLAG_MAG_AUTO_ON 0x25      // Enable online magnetometer calibration
 #define ESB_PONG_FLAG_MAG_AUTO_OFF 0x26     // Disable online magnetometer calibration
+#define ESB_PONG_FLAG_TCAL_HEATED_START 0x27 // Request heated T-Cal with the configured default target
+#define ESB_WOM_TIMEOUT_CLEAR 0xffff
+#define ESB_WOM_ENTER 0xfffe
+#define ESB_PONG_FLAG_WOM_CONTROL 0x28 // BE16 operation (0=query, 0xffff=clear, 0xfffe=enter), BE16 token
+#define ESB_PING_FLAG_WOM_RESULT 0x29 // Response only: minutes, 0=cleared, 0xfffe=entry accepted; matching token
+#define ESB_PING_FLAG_WOM_ERROR 0x2A // Response only: positive errno, matching token
 // Runtime magnetometer hold. Unlike MAG_ON/MAG_OFF this does not restart fusion,
 // does not touch flash, and is not persisted across a reboot.
-#define ESB_PONG_FLAG_MAG_HOLD 0x27   // Stop trusting the magnetometer
-#define ESB_PONG_FLAG_MAG_UNHOLD 0x28 // Resume normal magnetometer fusion
+#define ESB_PONG_FLAG_MAG_HOLD 0x38   // Stop trusting the magnetometer
+#define ESB_PONG_FLAG_MAG_UNHOLD 0x39 // Resume normal magnetometer fusion
 #define ESB_PONG_FLAG_OTA_QUERY_INFO 0x30   // Request firmware info for ESB OTA
 #define ESB_PONG_FLAG_OTA_ABORT 0x31        // Abort ESB OTA update
 #define ESB_PONG_FLAG_OTA_SUPPRESS 0x32     // Suppress tracker during OTA (reduce poll rate)
 #define ESB_PONG_FLAG_OTA_UNSUPPRESS 0x33   // Resume normal poll rate after OTA
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_ON 0x34  // Start batch raw data collection (data[8] = target Hz, 0 = accel ODR)
 #define ESB_PONG_FLAG_DATA_COLLECT_BATCH_OFF 0x35 // Stop batch raw data collection
+#define ESB_PONG_FLAG_DATA_COLLECT_METADATA 0x36 // Request metadata/calibration mask/chunk; token bytes 10-11
 
 // Raw data collection packet types
 // DEPRECATED on tracker: ESB_RAW_IMU/MAG unused; live TX is ESB_RAW_IMU_QUAT_TYPE.
@@ -161,7 +192,9 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 
 #define ESB_RAW_IMU_TYPE    0x10  // DEPRECATED: legacy raw IMU (float)
 #define ESB_RAW_MAG_TYPE    0x11  // DEPRECATED: reserved raw mag
-#define ESB_RAW_META_TYPE   0x12  // Metadata (ODR, range, sensor IDs - sent once)
+// Metadata (ODR, range, sensor IDs): captured once per collection session,
+// sent at session start, and replayed on explicit requests.
+#define ESB_RAW_META_TYPE   0x12
 #define ESB_RAW_IMU_QUAT_TYPE 0x13  // Raw IMU with gyrQuat (packet-loss resistant)
 #define ESB_RAW_CAL_TYPE    0x14  // Extended calibration metadata (sub-typed)
 
@@ -184,8 +217,11 @@ int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 #define ESB_OTA_ACTIVATE_TYPE   0x25  // Activate new firmware (receiver → tracker)
 
 bool esb_ready(void);
+struct led_connection_facts;
+void esb_led_connection_facts(struct led_connection_facts *facts);
 
 // Get remote command flag to echo back in PING
+void esb_get_ping_request_data(uint8_t out[4]);
 uint8_t esb_get_ping_ack_flag(void);
 
 // Additional delay applied to the base ping interval after repeated failures.

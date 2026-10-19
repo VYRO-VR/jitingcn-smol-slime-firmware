@@ -17,8 +17,8 @@ Two new flags in PONG `data[7]`, alongside the existing ones in
 
 | Flag | Value | Meaning |
 |---|---|---|
-| `ESB_PONG_FLAG_MAG_HOLD` | `0x27` | Stop the fusion filter trusting the magnetometer |
-| `ESB_PONG_FLAG_MAG_UNHOLD` | `0x28` | Resume normal magnetometer fusion |
+| `ESB_PONG_FLAG_MAG_HOLD` | `0x38` | Stop the fusion filter trusting the magnetometer |
+| `ESB_PONG_FLAG_MAG_UNHOLD` | `0x39` | Resume normal magnetometer fusion |
 
 Neither carries any PONG payload bytes — `data[3..11]` are untouched, so the
 normal time-sync path applies. The values sit outside `0x30-0x33`, which the OTA

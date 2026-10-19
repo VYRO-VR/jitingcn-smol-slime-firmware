@@ -40,6 +40,8 @@ void vqf_update(float *g, float *a, float *m, float time);
 
 void vqf_get_gyro_bias(float *g_off);
 void vqf_set_gyro_bias(float *g_off);
+/* New gyro input = old input + delta_dps, in input-IMU axes. */
+void vqf_rebase_gyro_bias(const float delta_dps[3]);
 
 void vqf_update_gyro_sanity(float *g, float *m);
 int vqf_get_gyro_sanity(void);
@@ -52,13 +54,10 @@ bool vqf_get_mag_dist_detected(void);
 void vqf_set_mag_hold(bool hold);
 bool vqf_get_rest_heading_disturbed(void);
 bool vqf_get_mag_hold(void);
-void vqf_reset_mag_ref(void);
-void vqf_set_mag_ref(float norm, float dip);
 float vqf_get_mag_ref_norm(void);
 void vqf_get_mag_ref(float *norm, float *dip);
 float vqf_get_delta(void);
 void vqf_set_delta(float delta);
-void vqf_get_relative_rest_deviations(float *out);
 
 // Debug information structure
 //
@@ -106,7 +105,8 @@ typedef struct {
 #if IS_ENABLED(CONFIG_VQF_ADAPTIVE_TAU_ACC)
     // Adaptive tauAcc state
     float tau_acc;             // current tauAcc value (seconds)
-    float motion_intensity;    // motion intensity estimate [0, 1]
+    float acc_deviation;       // normalized acceleration norm deviation [0, 1]
+    float angular_speed;       // normalized bias-corrected angular speed [0, 1]
 #endif
     // Rest detection diagnostics (cumulative since boot/init)
     uint32_t rest_enter_count;     // number of transitions to rest
