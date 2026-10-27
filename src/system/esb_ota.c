@@ -76,9 +76,9 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 /* MCUboot update BINs include the image header and therefore start at slot0.
  * Legacy raw images start after the MBR. */
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
-#define OTA_FLASH_BASE      PARTITION_OFFSET(slot0_partition)
+#define OTA_FLASH_BASE      FIXED_PARTITION_OFFSET(slot0_partition)
 #else
-#define OTA_FLASH_BASE      MAX(PARTITION_NODE_OFFSET(DT_CHOSEN(zephyr_code_partition)), 0x1000)
+#define OTA_FLASH_BASE      MAX(FIXED_PARTITION_NODE_OFFSET(DT_CHOSEN(zephyr_code_partition)), 0x1000)
 #endif
 
 /*
@@ -95,7 +95,7 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 #define OTA_SUPPORTED        1
 #elif defined(CONFIG_BOOTLOADER_MCUBOOT)
 #if CONFIG_SOC_NRF52833
-#define OTA_FLASH_END        PARTITION_OFFSET(storage_partition)
+#define OTA_FLASH_END        FIXED_PARTITION_OFFSET(storage_partition)
 #define OTA_USE_RAM_ENGINE   1
 #define OTA_SUPPORTED        1
 #else
@@ -119,7 +119,7 @@ LOG_MODULE_REGISTER(esb_ota, LOG_LEVEL_INF);
 #define OTA_SUPPORTED        1
 #elif CONFIG_SOC_NRF52833
 #if DT_NODE_EXISTS(DT_NODELABEL(storage_partition))
-#define OTA_FLASH_END PARTITION_OFFSET(storage_partition)
+#define OTA_FLASH_END FIXED_PARTITION_OFFSET(storage_partition)
 #else
 #error "nRF52833 OTA requires a storage_partition DT app boundary"
 #endif
