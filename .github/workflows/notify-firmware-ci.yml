@@ -1,0 +1,26 @@
+name: Notify Firmware CI
+
+# Tells VYRO-VR/Firmware to build and publish a release whenever dev updates.
+# Requires the FIRMWARE_CI_TOKEN secret: a token with write access to the
+# VYRO-VR/Firmware repository (fine-grained PAT with Contents: read & write).
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch firmware-updated
+        env:
+          GH_TOKEN: ${{ secrets.FIRMWARE_CI_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api repos/VYRO-VR/Firmware/dispatches \
+            -f event_type=firmware-updated \
+            -f "client_payload[repository]=${GITHUB_REPOSITORY}" \
+            -f "client_payload[sha]=${GITHUB_SHA}"
